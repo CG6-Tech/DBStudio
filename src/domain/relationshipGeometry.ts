@@ -103,6 +103,18 @@ export function connectedRelationshipIds(document: SchemaDocument, activeTableId
     .map((relationship) => relationship.id));
 }
 
+export function indexRelationshipsByTable(relationships: Relationship[]): Map<string, Set<string>> {
+  const relationshipIdsByTable = new Map<string, Set<string>>();
+  relationships.forEach((relationship) => {
+    [relationship.sourceTableId, relationship.targetTableId].forEach((tableId) => {
+      const relationshipIds = relationshipIdsByTable.get(tableId) ?? new Set<string>();
+      relationshipIds.add(relationship.id);
+      relationshipIdsByTable.set(tableId, relationshipIds);
+    });
+  });
+  return relationshipIdsByTable;
+}
+
 export function relationshipAnimationEnabled(activeRelationshipCount: number, reducedMotion: boolean): boolean {
   return activeRelationshipCount > 0 && !reducedMotion;
 }

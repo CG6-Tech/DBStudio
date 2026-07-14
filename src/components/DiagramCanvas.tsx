@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Application, Container, FederatedPointerEvent, Graphics, Text, TextStyle } from "pixi.js";
 import RBush from "rbush";
 import {
-  buildRelationshipGeometry, connectedRelationshipIds, relationshipAnimationEnabled, roundedOrthogonalPath, type AnchorSide, type Point,
+  buildRelationshipGeometry, connectedRelationshipIds, indexRelationshipsByTable, relationshipAnimationEnabled, roundedOrthogonalPath, type AnchorSide, type Point,
 } from "../domain/relationshipGeometry";
 import type { LayoutNode, LayoutResult, Relationship, SchemaDocument } from "../domain/types";
 import { assignTableToArea, updateArea, updateNote, updateTable } from "../domain/schemaActions";
@@ -184,6 +184,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       return table && (table.position.x !== 0 || table.position.y !== 0) ? { ...node, ...table.position } : node;
     });
     const nodeById = new Map<string, LayoutNode>(effectiveNodes.map((node) => [node.id, node]));
+    const relationshipIdsByTable = indexRelationshipsByTable(document.relationships);
     const index = new RBush<SpatialItem>();
     index.load(effectiveNodes.map((node) => ({ minX: node.x, minY: node.y, maxX: node.x + node.width, maxY: node.y + node.height, id: node.id })));
     const viewport = viewportRef.current;
@@ -356,6 +357,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     });
 
     let dashPhase = 0;
+    const dirtyRelationshipIds = new Set<string>();
     const redrawRelationship = (relationshipId: string, recalculateGeometry = false) => {
       const render = edgeRenders.get(relationshipId);
       if (!render) return;
@@ -377,14 +379,64 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     world.addChild(edgeLayer);
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (relationshipAnimationEnabled(activeRelationshipIds.size, reducedMotion)) {
-      const animateRelationships = () => {
+    const animateActiveRelationships = relationshipAnimationEnabled(activeRelationshipIds.size, reducedMotion);
+    const updateRelationships = () => {
+      const recalculatedIds = new Set(dirtyRelationshipIds);
+      dirtyRelationshipIds.clear();
+      recalculatedIds.forEach((relationshipId) => redrawRelationship(relationshipId, true));
+      if (animateActiveRelationships) {
         dashPhase += app.ticker.deltaMS * 0.045;
-        activeRelationshipIds.forEach((relationshipId) => redrawRelationship(relationshipId));
-      };
-      app.ticker.add(animateRelationships);
-      tickerCleanupRef.current = () => app.ticker.remove(animateRelationships);
-    }
+        activeRelationshipIds.forEach((relationshipId) => {
+          if (!recalculatedIds.has(relationshipId)) redrawRelationship(relationshipId);
+        });
+      }
+    };
+    app.ticker.add(updateRelationships);
+    tickerCleanupRef.current = () => app.ticker.remove(updateRelationships);
+
+    let activeTableDrag: {
+      pointerId: number;
+      tableId: string;
+      card: Container;
+      node: LayoutNode;
+      startPointer: Point;
+      startCard: Point;
+      moved: boolean;
+    } | null = null;
+
+    const moveActiveTable = (event: FederatedPointerEvent) => {
+      const drag = activeTableDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const scale = viewportRef.current.scale;
+      const x = drag.startCard.x + (event.global.x - drag.startPointer.x) / scale;
+      const y = drag.startCard.y + (event.global.y - drag.startPointer.y) / scale;
+      drag.moved ||= Math.abs(x - drag.startCard.x) + Math.abs(y - drag.startCard.y) > 2;
+      drag.card.position.set(x, y);
+      drag.node.x = x;
+      drag.node.y = y;
+      relationshipIdsByTable.get(drag.tableId)?.forEach((relationshipId) => dirtyRelationshipIds.add(relationshipId));
+    };
+
+    const finishActiveTableDrag = (event: FederatedPointerEvent) => {
+      const drag = activeTableDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      activeTableDrag = null;
+      if (!drag.moved) {
+        setSelection({ kind: "table", tableId: drag.tableId });
+        return;
+      }
+      const table = document.tables.find((item) => item.id === drag.tableId);
+      if (!table) return;
+      let next = updateTable(document, table.id, { position: { x: drag.card.x, y: drag.card.y } });
+      const center = { x: drag.card.x + drag.node.width / 2, y: drag.card.y + drag.node.height / 2 };
+      const targetArea = [...document.areas].reverse().find((area) => !area.locked && center.x >= area.x && center.x <= area.x + area.width && center.y >= area.y && center.y <= area.y + area.height);
+      next = assignTableToArea(next, table.id, targetArea?.id ?? null);
+      onReplace(targetArea ? `Move table into ${targetArea.name}` : "Move table", next);
+    };
+
+    app.stage.on("globalpointermove", moveActiveTable);
+    app.stage.on("pointerup", finishActiveTableDrag);
+    app.stage.on("pointerupoutside", finishActiveTableDrag);
 
     document.tables.forEach((table) => {
       const node = nodeById.get(table.id);
@@ -394,43 +446,18 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       card.position.set(node.x, node.y);
       card.eventMode = "static";
       card.cursor = "pointer";
-      let dragging = false;
-      let moved = false;
-      let dragStart = { x: 0, y: 0, cardX: node.x, cardY: node.y };
       card.on("pointerdown", (event: FederatedPointerEvent) => {
         event.stopPropagation();
-        dragging = true;
-        moved = false;
-        dragStart = { x: event.global.x, y: event.global.y, cardX: card.x, cardY: card.y };
+        activeTableDrag = {
+          pointerId: event.pointerId,
+          tableId: table.id,
+          card,
+          node,
+          startPointer: { x: event.global.x, y: event.global.y },
+          startCard: { x: card.x, y: card.y },
+          moved: false,
+        };
       });
-      card.on("pointermove", (event: FederatedPointerEvent) => {
-        if (!dragging) return;
-        const scale = viewportRef.current.scale;
-        const x = dragStart.cardX + (event.global.x - dragStart.x) / scale;
-        const y = dragStart.cardY + (event.global.y - dragStart.y) / scale;
-        moved ||= Math.abs(x - dragStart.cardX) + Math.abs(y - dragStart.cardY) > 2;
-        card.position.set(x, y);
-        node.x = x;
-        node.y = y;
-        document.relationships
-          .filter((relationship) => relationship.sourceTableId === table.id || relationship.targetTableId === table.id)
-          .forEach((relationship) => redrawRelationship(relationship.id, true));
-      });
-      const finishTableDrag = () => {
-        if (!dragging) return;
-        dragging = false;
-        if (!moved) {
-          setSelection({ kind: "table", tableId: table.id });
-          return;
-        }
-        let next = updateTable(document, table.id, { position: { x: card.x, y: card.y } });
-        const center = { x: card.x + node.width / 2, y: card.y + node.height / 2 };
-        const targetArea = [...document.areas].reverse().find((area) => !area.locked && center.x >= area.x && center.x <= area.x + area.width && center.y >= area.y && center.y <= area.y + area.height);
-        next = assignTableToArea(next, table.id, targetArea?.id ?? null);
-        onReplace(targetArea ? `Move table into ${targetArea.name}` : "Move table", next);
-      };
-      card.on("pointerup", finishTableDrag);
-      card.on("pointerupoutside", finishTableDrag);
 
       const background = new Graphics()
         .roundRect(0, 0, node.width, node.height, 10)
@@ -491,6 +518,15 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       });
       world.addChild(card);
     });
+
+    return () => {
+      activeTableDrag = null;
+      app.stage.off("globalpointermove", moveActiveTable);
+      app.stage.off("pointerup", finishActiveTableDrag);
+      app.stage.off("pointerupoutside", finishActiveTableDrag);
+      tickerCleanupRef.current();
+      tickerCleanupRef.current = () => undefined;
+    };
   }, [document, layout, selection, setSelection, rendererReady, viewportVersion, onReplace]);
 
   useEffect(() => {
@@ -513,7 +549,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     world.scale.set(scale);
     world.position.set(viewport.x, viewport.y);
     setViewportVersion((version) => version + 1);
-  }, [fitRequest, layout, rendererReady, document]);
+  }, [fitRequest, rendererReady]);
 
   return (
     <div className="canvas-shell" ref={hostRef}>

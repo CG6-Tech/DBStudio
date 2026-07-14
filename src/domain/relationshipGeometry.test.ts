@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseSchema } from "./parser";
-import { buildRelationshipGeometry, connectedRelationshipIds, fieldAnchor, relationshipAnimationEnabled, relationshipCardinality, roundedOrthogonalPath } from "./relationshipGeometry";
+import { buildRelationshipGeometry, connectedRelationshipIds, fieldAnchor, indexRelationshipsByTable, relationshipAnimationEnabled, relationshipCardinality, roundedOrthogonalPath } from "./relationshipGeometry";
 import type { LayoutNode } from "./types";
 
 const sql = `CREATE TABLE users (
@@ -50,6 +50,13 @@ describe("relationship geometry", () => {
     const document = parseSchema(sql);
     expect(connectedRelationshipIds(document, document.tables[0].id).size).toBe(2);
     expect(connectedRelationshipIds(document, null).size).toBe(0);
+  });
+
+  it("indexes connected relationships once for drag updates", () => {
+    const document = parseSchema(sql);
+    const index = indexRelationshipsByTable(document.relationships);
+    expect(index.get(document.tables[0].id)).toEqual(new Set(document.relationships.map((relationship) => relationship.id)));
+    expect(index.get(document.tables[1].id)).toEqual(new Set(document.relationships.map((relationship) => relationship.id)));
   });
 
   it("disables decorative movement for reduced-motion users", () => {

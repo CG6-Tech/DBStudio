@@ -2,12 +2,12 @@
 
 ## Goal
 
-Replace the table header's dotted circular symbol, which resembles a loading indicator, with an immediately recognizable focus icon.
+Replace the table header's focus brackets with a compact circular target icon.
 
 ## Design
 
-- Draw four separated corner brackets forming an 18 by 18 canvas-unit focus frame.
-- Draw a small center dot inside the frame.
+- Draw a complete 20 by 20 canvas-unit circular outline with a 2 canvas-unit stroke.
+- Draw a small center dot inside the circle so the control reads as a focus target rather than a radio button.
 - Use the existing muted header-control color at rest.
 - Use the existing subtle green circular hover background.
 - Preserve the current 34 by 34 pointer hit target.
@@ -25,7 +25,7 @@ No width, relationship-port, routing, or selection behavior changes are included
 
 ## Verification
 
-- The dotted ring is no longer visible.
-- The four corner brackets and center dot remain legible at normal canvas zoom.
+- The previous focus brackets are no longer visible.
+- The complete circular outline and center dot remain legible at normal canvas zoom.
 - Hover and click behavior remain unchanged.
 - Produce a fresh macOS app bundle after implementation, as requested.

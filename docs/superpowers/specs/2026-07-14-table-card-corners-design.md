@@ -2,11 +2,11 @@
 
 ## Problem
 
-The table card uses a 10px rounded outer shape, but its 5px color accent is a square full-width rectangle. The accent therefore extends beyond the rounded top boundary and creates visible protrusions at both corners.
+The table card used a rounded outer shape with a square full-width color accent. The accent therefore extended beyond the rounded top boundary and created visible protrusions at both corners.
 
 ## Approved Design
 
-Replace the square accent with one closed vector path derived from the same quadratic corner curve as the card. The path follows only the top five pixels of both 10px corners, uses a straight inner edge, and adds no masks or display objects. Draw the outer border last so antialiasing remains continuous around the card.
+Use a 5px card radius and a 10px accent. Replace the square accent with an isolated closed vector path that follows the complete quadratic top corners and continues vertically to the accent's lower edge. The implementation adds no masks or display objects. Draw the outer border last so antialiasing remains continuous around the card.
 
 ## Verification
 

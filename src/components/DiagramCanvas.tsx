@@ -40,8 +40,8 @@ const titleStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", f
 const columnStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, fill: colors.text });
 const typeStyle = new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, fill: colors.type });
 const badgeStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 9, fontWeight: "700", fill: colors.key });
-const cardCornerRadius = 10;
-const cardAccentHeight = 5;
+const cardCornerRadius = 5;
+const cardAccentHeight = 10;
 
 function colorNumber(value: string): number {
   return Number.parseInt(value.replace("#", ""), 16);
@@ -55,15 +55,14 @@ function drawSolidRoute(graphics: Graphics, points: Point[], color: number, widt
 }
 
 function drawTopAccent(graphics: Graphics, width: number, color: number): void {
-  const split = 1 - Math.sqrt(cardAccentHeight / cardCornerRadius);
-  const inset = cardCornerRadius * split * split;
-  const controlInset = cardCornerRadius * split;
   graphics
-    .moveTo(inset, cardAccentHeight)
-    .quadraticCurveTo(controlInset, 0, cardCornerRadius, 0)
+    .beginPath()
+    .moveTo(0, cardAccentHeight)
+    .lineTo(0, cardCornerRadius)
+    .quadraticCurveTo(0, 0, cardCornerRadius, 0)
     .lineTo(width - cardCornerRadius, 0)
-    .quadraticCurveTo(width - controlInset, 0, width - inset, cardAccentHeight)
-    .lineTo(inset, cardAccentHeight)
+    .quadraticCurveTo(width, 0, width, cardCornerRadius)
+    .lineTo(width, cardAccentHeight)
     .closePath()
     .fill(color);
 }

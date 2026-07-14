@@ -40,6 +40,8 @@ const titleStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", f
 const columnStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, fill: colors.text });
 const typeStyle = new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, fill: colors.type });
 const badgeStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 9, fontWeight: "700", fill: colors.key });
+const cardCornerRadius = 10;
+const cardAccentHeight = 5;
 
 function colorNumber(value: string): number {
   return Number.parseInt(value.replace("#", ""), 16);
@@ -50,6 +52,20 @@ function drawSolidRoute(graphics: Graphics, points: Point[], color: number, widt
   graphics.moveTo(points[0].x, points[0].y);
   points.slice(1).forEach((point) => graphics.lineTo(point.x, point.y));
   graphics.stroke({ color, width });
+}
+
+function drawTopAccent(graphics: Graphics, width: number, color: number): void {
+  const split = 1 - Math.sqrt(cardAccentHeight / cardCornerRadius);
+  const inset = cardCornerRadius * split * split;
+  const controlInset = cardCornerRadius * split;
+  graphics
+    .moveTo(inset, cardAccentHeight)
+    .quadraticCurveTo(controlInset, 0, cardCornerRadius, 0)
+    .lineTo(width - cardCornerRadius, 0)
+    .quadraticCurveTo(width - controlInset, 0, width - inset, cardAccentHeight)
+    .lineTo(inset, cardAccentHeight)
+    .closePath()
+    .fill(color);
 }
 
 export function drawDashedRoute(graphics: Graphics, points: Point[], phase: number, color: number, width: number): void {
@@ -460,13 +476,13 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       });
 
       const background = new Graphics()
-        .roundRect(0, 0, node.width, node.height, 10)
-        .fill(colors.card)
-        .stroke({ color: tableSelected ? colorNumber(table.color) : colors.border, width: tableSelected ? 2 : 1 });
-      background.roundRect(0, 0, node.width, 50, 10).fill(colors.cardTop);
-      background.rect(0, 0, node.width, 5).fill(colorNumber(table.color));
+        .roundRect(0, 0, node.width, node.height, cardCornerRadius)
+        .fill(colors.card);
+      background.roundRect(0, 0, node.width, 50, cardCornerRadius).fill(colors.cardTop);
+      drawTopAccent(background, node.width, colorNumber(table.color));
       background.rect(0, 40, node.width, 10).fill(colors.cardTop);
       background.moveTo(0, 50).lineTo(node.width, 50).stroke({ color: colors.border, width: 1 });
+      background.roundRect(0, 0, node.width, node.height, cardCornerRadius).stroke({ color: tableSelected ? colorNumber(table.color) : colors.border, width: tableSelected ? 2 : 1 });
       card.addChild(background);
 
       const title = new Text({ text: table.name, style: titleStyle });

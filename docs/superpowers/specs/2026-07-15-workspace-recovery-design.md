@@ -17,6 +17,7 @@ ViewDB stores workspace-owned files under:
   sql-erd.json
   recovery/
     <transaction-id>/
+      manifest.json
       schema/users.sql
       schema/orders.sql
       .viewdb/sql-erd.json
@@ -52,6 +53,41 @@ The backend performs these steps:
 
 Only modified SQL files are included. A preflight failure occurs before the recovery directory or temporary files are created.
 
+## Transaction algorithm
+
+Use a linear prepare-commit-rollback algorithm. Let `n` be the number of modified files and `B` the total number of bytes copied and written.
+
+### 1. Preflight
+
+Build the ordered replacement vector once. During the same pass:
+
+- Resolve each destination relative to the canonical workspace root.
+- Insert each destination into a hash set and reject duplicates.
+- Validate SQL and compare the current file hash with the original hash supplied by the frontend.
+- Compute the replacement hash and record whether the destination already exists.
+
+The vector provides stable commit order. The hash set gives expected constant-time duplicate detection. No later phase searches the workspace file list.
+
+### 2. Prepare
+
+Create the recovery transaction, then write and flush one immutable `manifest.json` containing the transaction ID and, for every planned entry, its kind, relative destination, relative recovery path, original hash, replacement hash, and temporary filename. Copy each existing destination to its mirrored recovery path, write every replacement to a sibling temporary file, and flush it. Commit starts only after every entry is prepared.
+
+The manifest is written once before file preparation instead of being rewritten after every file. The backend also keeps a `committedCount` integer in memory, so it can identify the committed prefix without scanning entries.
+
+### 3. Commit
+
+Rename temporary files over their destinations in vector order. Increment `committedCount` only after each rename succeeds. Rename keeps each individual destination replacement atomic because its temporary file is created beside it.
+
+### 4. Rollback
+
+On a commit failure, iterate only the committed vector prefix in reverse and restore each destination from its mirrored recovery copy. This is `O(n)` and does not require graph traversal or repeated path lookup. Preserve the transaction directory and manifest on every failure after the recovery transaction is created.
+
+### 5. Finalize
+
+After SQL, metadata, and legacy-metadata migration all succeed, recursively delete the transaction directory and remove the empty recovery parent. A cleanup failure becomes a warning.
+
+The algorithm uses `O(n)` metadata memory and `O(n + B)` work. File copying and writing dominate runtime and are unavoidable for durable recovery.
+
 ## Failure and cleanup behavior
 
 If a replacement or metadata migration step fails, ViewDB attempts to restore every replaced file in reverse replacement order. The recovery transaction is retained whether rollback succeeds or fails, and the error includes its absolute path for manual recovery.
@@ -66,7 +102,8 @@ If the workspace save succeeds but deletion of its recovery transaction fails, V
 - Return a structured result containing saved-file hashes and timestamps plus an optional cleanup warning.
 - Represent prepared replacements as an ordered vector. Each entry contains its destination, temporary path, recovery path, and replacement state.
 - Use workspace-relative paths as stable recovery keys and a set to reject duplicate destinations.
-- Keep rollback order deterministic by iterating the prepared replacement vector in reverse.
+- Track the committed vector prefix with a counter and roll it back in reverse.
+- Store an immutable transaction manifest with original and replacement hashes so retained recovery data is self-describing.
 
 The single backend transaction command owns recovery creation, replacement, rollback, cleanup, and legacy metadata migration. The frontend updates its in-memory workspace only after this command succeeds.
 
@@ -84,5 +121,6 @@ Verification should cover:
 - An external-change conflict creates no backup or temporary file.
 - Unsafe or duplicate paths are rejected before writes.
 - Recovery cleanup failure returns a warning without converting a completed save into a failure.
+- Preparing and rolling back multiple files does not repeatedly scan the workspace file collection.
 
 Do not automatically run tests or build the macOS app during implementation unless the user requests it.

@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Application, Container, FederatedPointerEvent, Graphics, Text, TextStyle } from "pixi.js";
 import RBush from "rbush";
-import type { LayoutResult, SchemaDocument } from "../domain/types";
+import {
+  buildRelationshipGeometry, connectedRelationshipIds, relationshipAnimationEnabled, type AnchorSide, type Point,
+} from "../domain/relationshipGeometry";
+import type { LayoutNode, LayoutResult, Relationship, SchemaDocument } from "../domain/types";
 import { assignTableToArea, updateArea, updateNote, updateTable } from "../domain/schemaActions";
 import { useUiStore } from "../state/uiStore";
 
@@ -42,10 +45,61 @@ function colorNumber(value: string): number {
   return Number.parseInt(value.replace("#", ""), 16);
 }
 
+function drawSolidRoute(graphics: Graphics, points: Point[], color: number, width: number): void {
+  if (points.length < 2) return;
+  graphics.moveTo(points[0].x, points[0].y);
+  points.slice(1).forEach((point) => graphics.lineTo(point.x, point.y));
+  graphics.stroke({ color, width });
+}
+
+export function drawDashedRoute(graphics: Graphics, points: Point[], phase: number, color: number, width: number): void {
+  const dash = 12;
+  const gap = 8;
+  const cycle = dash + gap;
+  let pattern = ((-phase % cycle) + cycle) % cycle;
+  let drawing = pattern < dash;
+  let patternRemaining = drawing ? dash - pattern : cycle - pattern;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = Math.hypot(dx, dy);
+    if (length === 0) continue;
+    let distance = 0;
+    while (distance < length) {
+      const step = Math.min(patternRemaining, length - distance);
+      if (drawing && step > 0) {
+        graphics.moveTo(start.x + dx * (distance / length), start.y + dy * (distance / length));
+        graphics.lineTo(start.x + dx * ((distance + step) / length), start.y + dy * ((distance + step) / length));
+      }
+      distance += step;
+      patternRemaining -= step;
+      if (patternRemaining <= 0.0001) {
+        drawing = !drawing;
+        patternRemaining = drawing ? dash : gap;
+      }
+    }
+  }
+  graphics.stroke({ color, width });
+}
+
+function createCardinalityBadge(label: "1" | "N", active: boolean): Container {
+  const badge = new Container();
+  const fill = active ? 0xaab9d0 : 0x80908a;
+  badge.addChild(new Graphics().circle(0, 0, active ? 14 : 12).fill(fill).stroke({ color: colors.canvas, width: 2 }));
+  const text = new Text({ text: label, style: new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: active ? 13 : 11, fontWeight: "700", fill: 0x14202a }) });
+  text.anchor.set(0.5);
+  badge.addChild(text);
+  return badge;
+}
+
 export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
   const worldRef = useRef<Container | null>(null);
+  const tickerCleanupRef = useRef<() => void>(() => undefined);
   const [rendererReady, setRendererReady] = useState(false);
   const [viewportVersion, setViewportVersion] = useState(0);
   const viewportRef = useRef({ x: 80, y: 80, scale: 1 });
@@ -109,6 +163,8 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     });
     return () => {
       cancelled = true;
+      tickerCleanupRef.current();
+      tickerCleanupRef.current = () => undefined;
       appRef.current = null;
       worldRef.current = null;
       if (initialized) app.destroy(true, { children: true });
@@ -119,13 +175,15 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     const app = appRef.current;
     const world = worldRef.current;
     if (!app || !world) return;
+    tickerCleanupRef.current();
+    tickerCleanupRef.current = () => undefined;
     world.removeChildren().forEach((child) => child.destroy({ children: true }));
 
     const effectiveNodes = layout.nodes.map((node) => {
       const table = document.tables.find((item) => item.id === node.id);
       return table && (table.position.x !== 0 || table.position.y !== 0) ? { ...node, ...table.position } : node;
     });
-    const nodeById = new Map(effectiveNodes.map((node) => [node.id, node]));
+    const nodeById = new Map<string, LayoutNode>(effectiveNodes.map((node) => [node.id, node]));
     const index = new RBush<SpatialItem>();
     index.load(effectiveNodes.map((node) => ({ minX: node.x, minY: node.y, maxX: node.x + node.width, maxY: node.y + node.height, id: node.id })));
     const viewport = viewportRef.current;
@@ -244,27 +302,66 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       world.addChild(noteContainer);
     });
 
-    const edgeLayer = new Graphics();
+    const activeTableId = selection?.tableId ?? null;
+    const activeRelationshipIds = connectedRelationshipIds(document, activeTableId);
+    const activeTable = document.tables.find((table) => table.id === activeTableId);
+    const activeColor = activeTable ? colorNumber(activeTable.color) : colors.selected;
+    const connectedColumnIds = new Set<string>();
+    const connectedPortSides = new Map<string, Set<AnchorSide>>();
+    const edgeLayer = new Container();
+    const edgeRenders = new Map<string, { relationship: Relationship; graphics: Graphics; sourceBadge: Container; targetBadge: Container; active: boolean }>();
+
+    const addPortSide = (columnId: string, side: AnchorSide) => {
+      const sides = connectedPortSides.get(columnId) ?? new Set<AnchorSide>();
+      sides.add(side);
+      connectedPortSides.set(columnId, sides);
+    };
+
     document.relationships.forEach((relationship) => {
       const source = nodeById.get(relationship.sourceTableId);
       const target = nodeById.get(relationship.targetTableId);
       if (!source || !target || (!visible.has(source.id) && !visible.has(target.id))) return;
-      const route = layout.edges.find((edge) => edge.id === relationship.id)?.points;
-      const points = route?.length ? route : [
-        { x: source.x + source.width, y: source.y + source.height / 2 },
-        { x: (source.x + source.width + target.x) / 2, y: source.y + source.height / 2 },
-        { x: (source.x + source.width + target.x) / 2, y: target.y + target.height / 2 },
-        { x: target.x, y: target.y + target.height / 2 },
-      ];
-      edgeLayer.moveTo(points[0].x, points[0].y);
-      points.slice(1).forEach((point) => edgeLayer.lineTo(point.x, point.y));
-      edgeLayer.stroke({ color: colors.edge, width: 2 });
-      const start = points[0];
-      const end = points.at(-1)!;
-      edgeLayer.circle(start.x, start.y, 4).fill(colors.selected);
-      edgeLayer.circle(end.x, end.y, 4).fill(colors.edge);
+      const geometry = buildRelationshipGeometry(document, relationship, nodeById);
+      if (!geometry) return;
+      const active = activeRelationshipIds.has(relationship.id);
+      if (active) {
+        connectedColumnIds.add(relationship.sourceColumnId);
+        connectedColumnIds.add(relationship.targetColumnId);
+        addPortSide(relationship.sourceColumnId, geometry.source.side);
+        addPortSide(relationship.targetColumnId, geometry.target.side);
+      }
+      const graphics = new Graphics();
+      const sourceBadge = createCardinalityBadge(geometry.sourceCardinality, active);
+      const targetBadge = createCardinalityBadge(geometry.targetCardinality, active);
+      edgeLayer.addChild(graphics, sourceBadge, targetBadge);
+      edgeRenders.set(relationship.id, { relationship, graphics, sourceBadge, targetBadge, active });
     });
+
+    let dashPhase = 0;
+    const redrawRelationship = (relationshipId: string) => {
+      const render = edgeRenders.get(relationshipId);
+      if (!render) return;
+      const geometry = buildRelationshipGeometry(document, render.relationship, nodeById);
+      if (!geometry) return;
+      render.graphics.clear();
+      if (render.active) drawDashedRoute(render.graphics, geometry.points, dashPhase, 0xaab9d0, 3);
+      else drawSolidRoute(render.graphics, geometry.points, colors.edge, 2);
+      render.sourceBadge.position.set(geometry.sourceBadge.x, geometry.sourceBadge.y);
+      render.targetBadge.position.set(geometry.targetBadge.x, geometry.targetBadge.y);
+    };
+
+    edgeRenders.forEach((_render, relationshipId) => redrawRelationship(relationshipId));
     world.addChild(edgeLayer);
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (relationshipAnimationEnabled(activeRelationshipIds.size, reducedMotion)) {
+      const animateRelationships = () => {
+        dashPhase += app.ticker.deltaMS * 0.045;
+        activeRelationshipIds.forEach(redrawRelationship);
+      };
+      app.ticker.add(animateRelationships);
+      tickerCleanupRef.current = () => app.ticker.remove(animateRelationships);
+    }
 
     document.tables.forEach((table) => {
       const node = nodeById.get(table.id);
@@ -290,6 +387,11 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
         const y = dragStart.cardY + (event.global.y - dragStart.y) / scale;
         moved ||= Math.abs(x - dragStart.cardX) + Math.abs(y - dragStart.cardY) > 2;
         card.position.set(x, y);
+        node.x = x;
+        node.y = y;
+        document.relationships
+          .filter((relationship) => relationship.sourceTableId === table.id || relationship.targetTableId === table.id)
+          .forEach((relationship) => redrawRelationship(relationship.id));
       });
       const finishTableDrag = () => {
         if (!dragging) return;
@@ -327,6 +429,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
 
       table.columns.forEach((column, columnIndex) => {
         const y = 58 + columnIndex * 34;
+        const connected = connectedColumnIds.has(column.id);
         const row = new Container();
         row.eventMode = "static";
         row.cursor = "pointer";
@@ -336,9 +439,11 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
           setSelection({ kind: "column", tableId: table.id, columnId: column.id });
         });
         row.position.set(0, y);
-        if (selection?.kind === "column" && selection.columnId === column.id) {
-          row.addChild(new Graphics().rect(4, -4, node.width - 8, 31).fill({ color: colors.selected, alpha: 0.09 }));
-        }
+        const rowBackground = new Graphics();
+        if (connected) rowBackground.rect(1, -7, node.width - 2, 33).fill({ color: activeColor, alpha: tableSelected ? 0.34 : 0.22 });
+        if (selection?.kind === "column" && selection.columnId === column.id) rowBackground.rect(4, -5, node.width - 8, 30).fill({ color: activeColor, alpha: 0.2 });
+        rowBackground.moveTo(0, 27).lineTo(node.width, 27).stroke({ color: colors.border, alpha: 0.7, width: 1 });
+        row.addChild(rowBackground);
         if (column.primaryKey) {
           const key = new Text({ text: "PK", style: badgeStyle });
           key.position.set(14, 4);
@@ -346,13 +451,19 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
         } else {
           row.addChild(new Graphics().circle(22, 10, 3).fill(column.nullable ? colors.type : colors.selected));
         }
-        const name = new Text({ text: column.name, style: columnStyle });
+        const name = new Text({ text: column.name, style: connected ? new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, fontWeight: "600", fill: 0x69a7ff }) : columnStyle });
         name.position.set(42, 0);
         row.addChild(name);
-        const type = new Text({ text: column.dataType, style: typeStyle });
+        const type = new Text({ text: column.dataType, style: connected ? new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, fill: 0x9bbfff }) : typeStyle });
         type.anchor.set(1, 0);
         type.position.set(node.width - 16, 3);
         row.addChild(type);
+        const portSides = tableSelected ? new Set<AnchorSide>(["left", "right"]) : connectedPortSides.get(column.id);
+        portSides?.forEach((side) => {
+          const port = new Graphics().circle(0, 10, 8).fill(activeColor).stroke({ color: colors.canvas, width: 2 });
+          port.position.x = side === "left" ? 0 : node.width;
+          row.addChild(port);
+        });
         card.addChild(row);
       });
       world.addChild(card);

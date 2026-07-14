@@ -1,5 +1,7 @@
 import { quoteIdentifier } from "./parser";
-import type { Column, SchemaDocument, SourceRange, Table } from "./types";
+import { formatFieldType } from "../dialects";
+import { buildSchemaIndex, type SchemaIndex } from "./schemaIndex";
+import type { Column, CustomType, SchemaDocument, SourceRange, Table } from "./types";
 
 export type Operation =
   | { kind: "renameTable"; tableId: string; previous: string; next: string }
@@ -69,9 +71,9 @@ interface Patch extends SourceRange {
   value: string;
 }
 
-function columnPatches(column: Column): Patch[] {
+function columnPatches(column: Column, document: SchemaDocument): Patch[] {
   const patches: Patch[] = [];
-  if (column.name !== column.originalName) patches.push({ ...column.nameRange, value: quoteIdentifier(column.name) });
+  if (column.name !== column.originalName) patches.push({ ...column.nameRange, value: quoteIdentifier(column.name, document.dialect) });
   if (column.dataType !== column.originalDataType) patches.push({ ...column.typeRange, value: column.dataType.trim() });
   if (column.nullable !== column.originalNullable) {
     if (column.notNullRange) {
@@ -83,67 +85,141 @@ function columnPatches(column: Column): Patch[] {
   return patches;
 }
 
-function renderTable(document: SchemaDocument, table: Table): string {
+function renderTable(document: SchemaDocument, table: Table, schemaIndex: SchemaIndex): string {
   const relationshipByColumn = new Map(
-    document.relationships
+    (schemaIndex.relationshipsByTableId.get(table.id) ?? [])
       .filter((relationship) => relationship.sourceTableId === table.id)
       .map((relationship) => [relationship.sourceColumnId, relationship]),
   );
   const lines = table.columns.map((column) => {
-    const parts = [`  ${quoteIdentifier(column.name)}`, column.dataType.trim()];
+    const parts = [`  ${quoteIdentifier(column.name, document.dialect)}`, column.dataType.trim()];
     if (!column.nullable) parts.push("NOT NULL");
     if (column.primaryKey) parts.push("PRIMARY KEY");
     if (column.unique && !column.primaryKey) parts.push("UNIQUE");
     if (column.defaultExpression) parts.push(`DEFAULT ${column.defaultExpression}`);
     const relationship = relationshipByColumn.get(column.id);
     if (relationship) {
-      const targetTable = document.tables.find((item) => item.id === relationship.targetTableId);
-      const targetColumn = targetTable?.columns.find((item) => item.id === relationship.targetColumnId);
-      if (targetTable && targetColumn) parts.push(`REFERENCES ${quoteIdentifier(targetTable.name)}(${quoteIdentifier(targetColumn.name)})`);
+      const targetTable = schemaIndex.tableById.get(relationship.targetTableId);
+      const targetColumn = schemaIndex.columnById.get(relationship.targetColumnId);
+      if (targetTable && targetColumn) parts.push(`REFERENCES ${quoteIdentifier(targetTable.name, document.dialect)}(${quoteIdentifier(targetColumn.name, document.dialect)})`);
     }
     return parts.join(" ");
   });
-  const qualifiedName = table.schema ? `${quoteIdentifier(table.schema)}.${quoteIdentifier(table.name)}` : quoteIdentifier(table.name);
-  return `CREATE TABLE ${qualifiedName} (\n${lines.join(",\n")}\n);`;
+  table.checkConstraints.forEach((constraint) => {
+    if (!constraint.expression.trim()) return;
+    const prefix = constraint.name?.trim() ? `CONSTRAINT ${quoteIdentifier(constraint.name.trim(), document.dialect)} ` : "";
+    lines.push(`  ${prefix}CHECK (${constraint.expression.trim()})`);
+  });
+  if (document.dialect === "mysql") {
+    table.indexes.forEach((index) => {
+      const columns = index.columnIds
+        .map((columnId) => schemaIndex.columnById.get(columnId))
+        .filter((column): column is Column => column?.tableId === table.id)
+        .map((column) => quoteIdentifier(column.name, document.dialect));
+      if (columns.length === 0) return;
+      const name = index.name?.trim() ? ` ${quoteIdentifier(index.name.trim(), document.dialect)}` : "";
+      lines.push(`  ${index.unique ? "UNIQUE " : ""}KEY${name} (${columns.join(", ")})`);
+    });
+  }
+  const qualifiedName = table.schema ? `${quoteIdentifier(table.schema, document.dialect)}.${quoteIdentifier(table.name, document.dialect)}` : quoteIdentifier(table.name, document.dialect);
+  return `CREATE TABLE ${qualifiedName} (\n${lines.join(",\n")}\n)${table.tableOptions ?? ""};`;
+}
+
+function renderPostgresIndexes(document: SchemaDocument, table: Table, schemaIndex: SchemaIndex): string[] {
+  if (document.dialect !== "postgresql") return [];
+  const qualifiedName = table.schema ? `${quoteIdentifier(table.schema, document.dialect)}.${quoteIdentifier(table.name, document.dialect)}` : quoteIdentifier(table.name, document.dialect);
+  return table.indexes.flatMap((index) => {
+    const columns = index.columnIds
+      .map((columnId) => schemaIndex.columnById.get(columnId))
+      .filter((column): column is Column => column?.tableId === table.id)
+      .map((column) => quoteIdentifier(column.name, document.dialect));
+    if (columns.length === 0) return [];
+    const fallbackName = `idx_${table.name}_${columns.map((column) => column.replaceAll('"', "")).join("_")}`;
+    const name = quoteIdentifier(index.name?.trim() || fallbackName, document.dialect);
+    return [`CREATE ${index.unique ? "UNIQUE " : ""}INDEX ${name} ON ${qualifiedName} USING ${index.method} (${columns.join(", ")});`];
+  });
+}
+
+function renderCustomType(document: SchemaDocument, type: CustomType): string | null {
+  if (document.dialect !== "postgresql" || !type.name.trim()) return null;
+  const qualifiedName = type.schema ? `${quoteIdentifier(type.schema, document.dialect)}.${quoteIdentifier(type.name, document.dialect)}` : quoteIdentifier(type.name, document.dialect);
+  if (type.kind === "enum") {
+    const values = type.values.map((value) => value.trim());
+    if (values.some((value) => !value) || new Set(values).size !== values.length) return null;
+    return `CREATE TYPE ${qualifiedName} AS ENUM (${values.map((value) => `'${value.replaceAll("'", "''")}'`).join(", ")});`;
+  }
+  if (type.kind === "domain") {
+    if (type.baseType.kind === "unresolved") return null;
+    const parts = [`CREATE DOMAIN ${qualifiedName} AS ${formatFieldType(type.baseType, document.dialect, document.customTypes)}`];
+    if (type.defaultExpression?.trim()) parts.push(`DEFAULT ${type.defaultExpression.trim()}`);
+    if (!type.nullable) parts.push("NOT NULL");
+    if (type.checkExpression?.trim()) parts.push(`CHECK (${type.checkExpression.trim()})`);
+    return `${parts.join(" ")};`;
+  }
+  const names = type.fields.map((field) => field.name.trim());
+  if (names.some((name) => !name) || new Set(names.map((name) => name.toLowerCase())).size !== names.length || type.fields.some((field) => field.type.kind === "unresolved")) return null;
+  const fields = type.fields.map((field) => `  ${quoteIdentifier(field.name, document.dialect)} ${formatFieldType(field.type, document.dialect, document.customTypes)}`);
+  return `CREATE TYPE ${qualifiedName} AS (\n${fields.join(",\n")}\n);`;
 }
 
 export function generateSql(document: SchemaDocument): string {
   const patches: Patch[] = [];
-  const insertions: string[] = [];
+  const customInsertions: string[] = [];
+  const tableInsertions: string[] = [];
+  const schemaIndex = buildSchemaIndex(document);
+  document.customTypes.forEach((type) => {
+    const rendered = renderCustomType(document, type);
+    if (type.isNew) {
+      if (rendered) customInsertions.push(rendered);
+    } else if (type.isEdited && rendered) {
+      patches.push({ ...type.statementRange, value: rendered });
+    }
+  });
   document.tables.forEach((table) => {
     if (table.isNew) {
-      insertions.push(renderTable(document, table));
+      tableInsertions.push([renderTable(document, table, schemaIndex), ...renderPostgresIndexes(document, table, schemaIndex)].join("\n"));
       return;
     }
-    if (document.structuralTableIds.includes(table.id)) {
-      patches.push({ ...table.statementRange, value: renderTable(document, table) });
+    if (schemaIndex.structuralTableIds.has(table.id)) {
+      patches.push({ ...table.statementRange, value: renderTable(document, table, schemaIndex) });
+      table.indexes.forEach((index) => {
+        if (index.standalone && index.sourceRange) patches.push({ ...index.sourceRange, value: "" });
+      });
+      tableInsertions.push(...renderPostgresIndexes(document, table, schemaIndex));
       return;
     }
-    if (table.name !== table.originalName) patches.push({ ...table.nameRange, value: quoteIdentifier(table.name) });
-    table.columns.forEach((column) => patches.push(...columnPatches(column)));
+    if (table.name !== table.originalName) patches.push({ ...table.nameRange, value: quoteIdentifier(table.name, document.dialect) });
+    table.columns.forEach((column) => patches.push(...columnPatches(column, document)));
   });
   document.removedStatementRanges.forEach((range) => patches.push({ ...range, value: "" }));
   document.relationships.forEach((relationship) => {
-    if (document.structuralTableIds.includes(relationship.sourceTableId)) return;
-    const sourceTable = document.tables.find((table) => table.id === relationship.sourceTableId);
-    const targetTable = document.tables.find((table) => table.id === relationship.targetTableId);
-    const sourceColumn = sourceTable?.columns.find((column) => column.id === relationship.sourceColumnId);
-    const targetColumn = targetTable?.columns.find((column) => column.id === relationship.targetColumnId);
+    if (schemaIndex.structuralTableIds.has(relationship.sourceTableId)) return;
+    const targetTable = schemaIndex.tableById.get(relationship.targetTableId);
+    const sourceColumn = schemaIndex.columnById.get(relationship.sourceColumnId);
+    const targetColumn = schemaIndex.columnById.get(relationship.targetColumnId);
     if (relationship.sourceColumnReferenceRange && sourceColumn && sourceColumn.name !== sourceColumn.originalName) {
-      patches.push({ ...relationship.sourceColumnReferenceRange, value: quoteIdentifier(sourceColumn.name) });
+      patches.push({ ...relationship.sourceColumnReferenceRange, value: quoteIdentifier(sourceColumn.name, document.dialect) });
     }
     if (targetTable && targetTable.name !== targetTable.originalName) {
-      patches.push({ ...relationship.targetTableReferenceRange, value: quoteIdentifier(targetTable.name) });
+      patches.push({ ...relationship.targetTableReferenceRange, value: quoteIdentifier(targetTable.name, document.dialect) });
     }
     if (targetColumn && targetColumn.name !== targetColumn.originalName) {
-      patches.push({ ...relationship.targetColumnReferenceRange, value: quoteIdentifier(targetColumn.name) });
+      patches.push({ ...relationship.targetColumnReferenceRange, value: quoteIdentifier(targetColumn.name, document.dialect) });
     }
   });
   patches.sort((a, b) => b.start - a.start || b.end - a.end);
   for (let index = 1; index < patches.length; index += 1) {
     if (patches[index - 1].start < patches[index].end) throw new Error("Overlapping SQL patches cannot be saved safely.");
   }
-  const patched = patches.reduce((sql, patch) => sql.slice(0, patch.start) + patch.value + sql.slice(patch.end), document.source);
+  const pieces: string[] = [];
+  let sourceCursor = document.source.length;
+  patches.forEach((patch) => {
+    pieces.push(document.source.slice(patch.end, sourceCursor), patch.value);
+    sourceCursor = patch.start;
+  });
+  pieces.push(document.source.slice(0, sourceCursor));
+  const patched = pieces.reverse().join("");
+  const insertions = [...customInsertions, ...tableInsertions];
   return insertions.length ? `${patched.trimEnd()}\n\n${insertions.join("\n\n")}\n` : patched;
 }
 

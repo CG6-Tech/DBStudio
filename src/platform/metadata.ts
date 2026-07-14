@@ -25,6 +25,7 @@ export function applyMetadata(document: SchemaDocument, metadata: WorkspaceMetad
   if (!metadata) return document;
   return {
     ...document,
+    hasSavedLayout: metadata.tables.length > 0,
     tables: document.tables.map((table, index) => {
       const visual = metadata.tables.find((item) => item.name.toLowerCase() === table.name.toLowerCase()) ?? metadata.tables[index];
       return visual ? { ...table, position: visual.position, color: visual.color, collapsed: visual.collapsed } : table;

@@ -10,7 +10,7 @@ interface InspectorProps {
 }
 
 export function Inspector({ document, selection, onOperation }: InspectorProps) {
-  const table = document.tables.find((item) => item.id === selection?.tableId);
+  const table = document.tables.find((item) => item.id === (selection?.kind === "table" || selection?.kind === "column" ? selection.tableId : undefined));
   const column = selection?.kind === "column" ? table?.columns.find((item) => item.id === selection.columnId) : undefined;
   const [name, setName] = useState("");
   const [dataType, setDataType] = useState("");

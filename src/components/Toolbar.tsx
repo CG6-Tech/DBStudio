@@ -1,9 +1,12 @@
+import type { SqlDialect } from "../domain/types";
+
 interface ToolbarProps {
   title: string;
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
   desktop: boolean;
+  dialect: SqlDialect;
   onExample: () => void;
   onOpen: () => void;
   onUndo: () => void;
@@ -11,6 +14,7 @@ interface ToolbarProps {
   onFit: () => void;
   onPreview: () => void;
   onSave: () => void;
+  onDialectChange: (dialect: SqlDialect) => void;
 }
 
 function Icon({ children }: { children: string }) {
@@ -30,6 +34,13 @@ export function Toolbar(props: ToolbarProps) {
         {props.title}
       </div>
       <nav className="toolbar-actions" aria-label="Document actions">
+        <label className="dialect-select" title="SQL dialect">
+          <span>Dialect</span>
+          <select value={props.dialect} onChange={(event) => props.onDialectChange(event.target.value as SqlDialect)}>
+            <option value="postgresql">PostgreSQL</option>
+            <option value="mysql">MySQL</option>
+          </select>
+        </label>
         <button onClick={props.onExample}><Icon>✦</Icon> Example</button>
         <button onClick={props.onOpen} title={props.desktop ? "Open SQL file" : "Available in the desktop build"}><Icon>⌁</Icon> Open</button>
         <span className="separator" />

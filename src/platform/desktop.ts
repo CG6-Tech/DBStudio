@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import type { OpenedDocument } from "../domain/types";
+import type { OpenedDocument, SqlDialect } from "../domain/types";
 
 export const EXAMPLE_SQL = `-- ViewDB two-table example
 CREATE TABLE users (
@@ -30,14 +30,14 @@ export function desktopAvailable(): boolean {
 
 export async function loadExample(): Promise<OpenedDocument> {
   if (isTauri()) return invoke<OpenedDocument>("load_example");
-  return { path: null, source: EXAMPLE_SQL, hash: await browserHash(EXAMPLE_SQL), modifiedMs: null, isExample: true };
+  return { dialect: "postgresql", path: null, source: EXAMPLE_SQL, hash: await browserHash(EXAMPLE_SQL), modifiedMs: null, isExample: true };
 }
 
 export async function openSqlFile(): Promise<OpenedDocument | null> {
   if (!isTauri()) {
     throw new Error("Opening local files is available in the Tauri desktop app. The browser preview uses the bundled example.");
   }
-  const path = await open({ multiple: false, filters: [{ name: "PostgreSQL", extensions: ["sql"] }] });
+  const path = await open({ multiple: false, filters: [{ name: "SQL schema", extensions: ["sql"] }] });
   return path ? invoke<OpenedDocument>("open_document", { path }) : null;
 }
 
@@ -52,6 +52,7 @@ export async function saveSqlFile(
   currentPath: string | null,
   source: string,
   originalHash: string,
+  dialect: SqlDialect,
 ): Promise<SaveResult | null> {
   if (!isTauri()) {
     const blob = new Blob([source], { type: "application/sql" });
@@ -63,7 +64,7 @@ export async function saveSqlFile(
     URL.revokeObjectURL(url);
     return { path: "viewdb-example.sql", hash: await browserHash(source), modifiedMs: Date.now(), backupPath: null };
   }
-  const path = currentPath ?? (await save({ defaultPath: "viewdb-example.sql", filters: [{ name: "PostgreSQL", extensions: ["sql"] }] }));
+  const path = currentPath ?? (await save({ defaultPath: "viewdb-example.sql", filters: [{ name: "SQL schema", extensions: ["sql"] }] }));
   if (!path) return null;
-  return invoke<SaveResult>("save_document", { path, source, originalHash: currentPath ? originalHash : null });
+  return invoke<SaveResult>("save_document", { path, source, originalHash: currentPath ? originalHash : null, dialect });
 }

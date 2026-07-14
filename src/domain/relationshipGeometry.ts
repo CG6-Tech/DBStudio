@@ -134,10 +134,12 @@ export function buildRelationshipGeometry(
   document: SchemaDocument,
   relationship: Relationship,
   nodeById: Map<string, LayoutNode>,
+  tableById?: Map<string, Table>,
+  columnById?: Map<string, Column>,
 ): RelationshipGeometry | null {
-  const sourceTable = document.tables.find((table) => table.id === relationship.sourceTableId);
-  const targetTable = document.tables.find((table) => table.id === relationship.targetTableId);
-  const sourceColumn = sourceTable?.columns.find((column) => column.id === relationship.sourceColumnId);
+  const sourceTable = tableById?.get(relationship.sourceTableId) ?? document.tables.find((table) => table.id === relationship.sourceTableId);
+  const targetTable = tableById?.get(relationship.targetTableId) ?? document.tables.find((table) => table.id === relationship.targetTableId);
+  const sourceColumn = columnById?.get(relationship.sourceColumnId) ?? sourceTable?.columns.find((column) => column.id === relationship.sourceColumnId);
   const sourceNode = nodeById.get(relationship.sourceTableId);
   const targetNode = nodeById.get(relationship.targetTableId);
   if (!sourceTable || !targetTable || !sourceColumn || !sourceNode || !targetNode) return null;

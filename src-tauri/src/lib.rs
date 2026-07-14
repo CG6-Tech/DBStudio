@@ -1,6 +1,7 @@
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlparser::{dialect::MySqlDialect, parser::Parser};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -10,9 +11,17 @@ use std::{
 
 const EXAMPLE_SQL: &str = include_str!("../assets/two-table-example.sql");
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum SqlDialect {
+    Postgresql,
+    Mysql,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OpenedDocument {
+    dialect: SqlDialect,
     path: Option<String>,
     source: String,
     hash: String,
@@ -49,11 +58,53 @@ fn validate_postgres(source: &str) -> Result<(), String> {
         .map_err(|error| format!("PostgreSQL parser rejected the SQL: {error}"))
 }
 
+fn validate_mysql(source: &str) -> Result<(), String> {
+    Parser::parse_sql(&MySqlDialect {}, source)
+        .map(|_| ())
+        .map_err(|error| format!("MySQL parser rejected the SQL: {error}"))
+}
+
+fn validate_dialect(source: &str, dialect: SqlDialect) -> Result<(), String> {
+    match dialect {
+        SqlDialect::Postgresql => validate_postgres(source),
+        SqlDialect::Mysql => validate_mysql(source),
+    }
+}
+
+fn has_strong_mysql_markers(source: &str) -> bool {
+    let upper = source.to_uppercase();
+    source.contains('`')
+        || upper.contains("AUTO_INCREMENT")
+        || upper.contains(" UNSIGNED")
+        || upper.contains("ENGINE=")
+        || upper.contains("ENGINE =")
+}
+
+fn detect_dialect(source: &str) -> Result<SqlDialect, String> {
+    let postgres = validate_postgres(source);
+    let mysql = validate_mysql(source);
+    if has_strong_mysql_markers(source) && mysql.is_ok() {
+        return Ok(SqlDialect::Mysql);
+    }
+    if postgres.is_ok() {
+        return Ok(SqlDialect::Postgresql);
+    }
+    if mysql.is_ok() {
+        return Ok(SqlDialect::Mysql);
+    }
+    Err(format!(
+        "The SQL is not valid PostgreSQL or MySQL.\n{}\n{}",
+        postgres.unwrap_err(),
+        mysql.unwrap_err()
+    ))
+}
+
 fn read_document(path: &Path) -> Result<OpenedDocument, String> {
     let source = fs::read_to_string(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-    validate_postgres(&source)?;
+    let dialect = detect_dialect(&source)?;
     Ok(OpenedDocument {
+        dialect,
         path: Some(path.to_string_lossy().into_owned()),
         hash: hash_source(&source),
         modified_ms: modified_ms(path),
@@ -78,8 +129,13 @@ fn metadata_path(path: &Path) -> Result<PathBuf, String> {
     Ok(parent.join("workspace.sql-erd.json"))
 }
 
-fn safe_save(path: &Path, source: &str, original_hash: Option<&str>) -> Result<SaveResult, String> {
-    validate_postgres(source)?;
+fn safe_save(
+    path: &Path,
+    source: &str,
+    original_hash: Option<&str>,
+    dialect: SqlDialect,
+) -> Result<SaveResult, String> {
+    validate_dialect(source, dialect)?;
     let parent = path
         .parent()
         .ok_or_else(|| "The destination has no parent folder.".to_string())?;
@@ -134,6 +190,7 @@ fn safe_save(path: &Path, source: &str, original_hash: Option<&str>) -> Result<S
 fn load_example() -> Result<OpenedDocument, String> {
     validate_postgres(EXAMPLE_SQL)?;
     Ok(OpenedDocument {
+        dialect: SqlDialect::Postgresql,
         path: None,
         source: EXAMPLE_SQL.to_string(),
         hash: hash_source(EXAMPLE_SQL),
@@ -167,8 +224,13 @@ fn save_workspace_metadata(path: String, json: String) -> Result<(), String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn save_document(path: String, source: String, original_hash: Option<String>) -> Result<SaveResult, String> {
-    safe_save(Path::new(&path), &source, original_hash.as_deref())
+fn save_document(
+    path: String,
+    source: String,
+    original_hash: Option<String>,
+    dialect: SqlDialect,
+) -> Result<SaveResult, String> {
+    safe_save(Path::new(&path), &source, original_hash.as_deref(), dialect)
 }
 
 #[cfg(test)]
@@ -190,13 +252,20 @@ mod tests {
             &path,
             "CREATE TABLE a (id bigint);",
             Some(&original_hash),
+            SqlDialect::Postgresql,
         )
         .expect("safe save");
         assert!(result.backup_path.is_some());
         assert_eq!(fs::read_to_string(&path).unwrap(), "CREATE TABLE a (id bigint);");
 
         fs::write(&path, "CREATE TABLE a (id text);").expect("external write");
-        let error = safe_save(&path, "CREATE TABLE a (id uuid);", Some(&result.hash)).unwrap_err();
+        let error = safe_save(
+            &path,
+            "CREATE TABLE a (id uuid);",
+            Some(&result.hash),
+            SqlDialect::Postgresql,
+        )
+        .unwrap_err();
         assert!(error.contains("changed outside ViewDB"));
     }
 
@@ -205,6 +274,31 @@ mod tests {
         let directory = tempfile::tempdir().expect("temp directory");
         let sql = directory.path().join("schema.sql");
         assert_eq!(metadata_path(&sql).unwrap(), directory.path().join("workspace.sql-erd.json"));
+    }
+
+    #[test]
+    fn validates_and_detects_mysql_schema() {
+        let source = "CREATE TABLE `users` (`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, PRIMARY KEY (`id`)) ENGINE=InnoDB;\n\
+CREATE TABLE `orders` (`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, `user_id` BIGINT UNSIGNED NOT NULL, PRIMARY KEY (`id`), KEY `idx_user_id` (`user_id`), CONSTRAINT `fk_orders_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)) ENGINE=InnoDB;";
+        validate_mysql(source).expect("mysql schema should parse");
+        assert_eq!(detect_dialect(source).unwrap(), SqlDialect::Mysql);
+    }
+
+    #[test]
+    fn save_uses_the_selected_dialect() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("schema.sql");
+        let mysql = "CREATE TABLE `users` (`id` INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;";
+        safe_save(&path, mysql, None, SqlDialect::Mysql).expect("mysql save should validate");
+        assert!(safe_save(&path, mysql, None, SqlDialect::Postgresql).is_err());
+    }
+
+    #[test]
+    fn portable_schema_defaults_to_postgresql() {
+        assert_eq!(
+            detect_dialect("CREATE TABLE users (id INT PRIMARY KEY);").unwrap(),
+            SqlDialect::Postgresql
+        );
     }
 }
 

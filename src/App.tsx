@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DiagramCanvas } from "./components/DiagramCanvas";
 import { CanvasToolbar } from "./components/CanvasToolbar";
 import { SqlPreview } from "./components/SqlPreview";
 import { Toolbar } from "./components/Toolbar";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
-import { commitOperation, generateSql, redo, undo, type Operation, type OperationState } from "./domain/operations";
+import { commitOperation, generateSql, redo, undo, type OperationState } from "./domain/operations";
 import { parseSchema } from "./domain/parser";
-import type { FileIdentity, OpenedDocument } from "./domain/types";
+import type { FileIdentity, OpenedDocument, SqlDialect } from "./domain/types";
 import { useLayout } from "./layout/useLayout";
 import { desktopAvailable, loadExample, openSqlFile, saveSqlFile } from "./platform/desktop";
 import { applyMetadata, loadMetadata, saveMetadata } from "./platform/metadata";
@@ -28,14 +28,25 @@ export function App() {
   const status = useUiStore((state) => state.status);
   const setStatus = useUiStore((state) => state.setStatus);
   const requestFit = useUiStore((state) => state.requestFit);
+  const autoLayoutRequest = useUiStore((state) => state.autoLayoutRequest);
   const document = history?.document ?? null;
-  const layout = useLayout(document);
+  const layout = useLayout(document, autoLayoutRequest);
+  const appliedManualLayoutRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (!document || layout?.kind !== "manual" || !layout.generation || appliedManualLayoutRef.current === layout.generation) return;
+    appliedManualLayoutRef.current = layout.generation;
+    const positionById = new Map(layout.nodes.map((node) => [node.id, { x: node.x, y: node.y }]));
+    const next = { ...document, hasSavedLayout: true, tables: document.tables.map((table) => ({ ...table, position: positionById.get(table.id) ?? table.position })) };
+    setHistory((current) => current ? commitOperation(current, { kind: "replaceDocument", label: "Auto layout", previous: current.document, next }) : current);
+    setStatus("Auto layout applied · unsaved changes");
+  }, [document, layout, setStatus]);
 
   const acceptOpenedDocument = useCallback(async (opened: OpenedDocument) => {
-    const parsed = applyMetadata(parseSchema(opened.source), await loadMetadata(opened.path));
+    const parsed = applyMetadata(parseSchema(opened.source, opened.dialect), await loadMetadata(opened.path));
     if (parsed.tables.length === 0) throw new Error("No supported CREATE TABLE statements were found.");
     setHistory({ document: parsed, past: [], future: [] });
-    setFile({ path: opened.path, hash: opened.hash, modifiedMs: opened.modifiedMs, isExample: opened.isExample });
+    setFile({ dialect: opened.dialect, path: opened.path, hash: opened.hash, modifiedMs: opened.modifiedMs, isExample: opened.isExample });
     setSelection(null);
     setFatalError(null);
     setStatus(opened.isExample ? "Example loaded" : "File opened");
@@ -66,10 +77,10 @@ export function App() {
     }
   };
 
-  const apply = (operation: Operation) => {
-    setHistory((current) => current ? commitOperation(current, operation) : current);
+  const replaceDocument = useCallback((label: string, next: NonNullable<typeof document>) => {
+    setHistory((current) => current ? commitOperation(current, { kind: "replaceDocument", label, previous: current.document, next }) : current);
     setStatus("Unsaved changes");
-  };
+  }, [setStatus]);
 
   const candidateSql = useMemo(() => {
     if (!document) return "";
@@ -85,20 +96,20 @@ export function App() {
     try {
       setBusy(true);
       setStatus("Validating and saving…");
-      const result = await saveSqlFile(file.path, candidateSql, file.hash);
+      const result = await saveSqlFile(file.path, candidateSql, file.hash, file.dialect);
       if (!result) {
         setStatus("Save cancelled");
         return;
       }
       await saveMetadata(desktopAvailable() ? result.path : null, document);
-      const reparsed = applyMetadata(parseSchema(candidateSql), {
+      const reparsed = applyMetadata(parseSchema(candidateSql, file.dialect), {
         version: 1,
         tables: document.tables.map((table) => ({ name: table.name, position: table.position, color: table.color, collapsed: table.collapsed })),
         areas: document.areas,
         notes: document.notes,
       });
       setHistory({ document: reparsed, past: [], future: [] });
-      setFile({ path: desktopAvailable() ? result.path : null, hash: result.hash, modifiedMs: result.modifiedMs, isExample: !desktopAvailable() });
+      setFile({ dialect: file.dialect, path: desktopAvailable() ? result.path : null, hash: result.hash, modifiedMs: result.modifiedMs, isExample: !desktopAvailable() });
       setStatus(result.backupPath ? `Saved · backup created` : "Saved");
       setFatalError(null);
     } catch (error) {
@@ -106,6 +117,30 @@ export function App() {
       setStatus("Save failed");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const changeDialect = (dialect: SqlDialect) => {
+    if (!document || !file || dialect === file.dialect) return;
+    try {
+      const parsed = applyMetadata(parseSchema(candidateSql, dialect), {
+        version: 1,
+        tables: document.tables.map((table) => ({ name: table.name, position: table.position, color: table.color, collapsed: table.collapsed })),
+        areas: document.areas,
+        notes: document.notes,
+      });
+      if (parsed.tables.length === 0) throw new Error(`No supported CREATE TABLE statements were found for ${dialect === "mysql" ? "MySQL" : "PostgreSQL"}.`);
+      setHistory((current) => current ? {
+        document: parsed,
+        past: candidateSql === document.source ? [] : [{ kind: "replaceDocument", label: "Change SQL dialect", previous: document, next: parsed }],
+        future: [],
+      } : current);
+      setFile({ ...file, dialect });
+      setSelection(null);
+      setStatus(`Dialect changed to ${dialect === "mysql" ? "MySQL" : "PostgreSQL"}`);
+      setFatalError(null);
+    } catch (error) {
+      setFatalError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -117,6 +152,7 @@ export function App() {
         canUndo={Boolean(history?.past.length)}
         canRedo={Boolean(history?.future.length)}
         desktop={desktopAvailable()}
+        dialect={file?.dialect ?? "postgresql"}
         onExample={() => void showExample()}
         onOpen={() => void openFile()}
         onUndo={() => setHistory((current) => {
@@ -134,6 +170,7 @@ export function App() {
         onFit={requestFit}
         onPreview={() => setPreviewOpen(!previewOpen)}
         onSave={() => void saveFile()}
+        onDialectChange={changeDialect}
       />
       <section className="workspace">
         {document && <WorkspaceSidebar
@@ -141,21 +178,15 @@ export function App() {
           operations={history?.past ?? []}
           fileName={documentTitle(file)}
           onOpen={() => void openFile()}
-          onReplace={(label, next) => {
-            if (!history) return;
-            apply({ kind: "replaceDocument", label, previous: history.document, next });
-          }}
+          onReplace={replaceDocument}
         />}
         <div className="diagram-region">
           {document && layout ? <DiagramCanvas
             document={document}
             layout={layout}
-            onReplace={(label, next) => {
-              if (!history) return;
-              apply({ kind: "replaceDocument", label, previous: history.document, next });
-            }}
+            onReplace={replaceDocument}
           /> : <div className="loading-state"><span />Preparing diagram…</div>}
-          <CanvasToolbar onFit={requestFit} />
+          {document && <CanvasToolbar document={document} />}
           {document && <SqlPreview open={previewOpen} sql={candidateSql} changes={history?.past.length ?? 0} onClose={() => setPreviewOpen(false)} />}
         </div>
       </section>

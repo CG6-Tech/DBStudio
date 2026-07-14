@@ -28,6 +28,55 @@ export interface RelationshipGeometry {
   targetCardinality: "1";
 }
 
+function samePoint(first: Point, second: Point): boolean {
+  return Math.abs(first.x - second.x) < 0.0001 && Math.abs(first.y - second.y) < 0.0001;
+}
+
+export function roundedOrthogonalPath(points: Point[], radius = 12, samplesPerCorner = 6): Point[] {
+  if (points.length < 3 || radius <= 0 || samplesPerCorner < 1) return [...points];
+  const rounded: Point[] = [{ ...points[0] }];
+
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const previous = points[index - 1];
+    const corner = points[index];
+    const next = points[index + 1];
+    const incoming = { x: corner.x - previous.x, y: corner.y - previous.y };
+    const outgoing = { x: next.x - corner.x, y: next.y - corner.y };
+    const incomingLength = Math.hypot(incoming.x, incoming.y);
+    const outgoingLength = Math.hypot(outgoing.x, outgoing.y);
+    const cross = incoming.x * outgoing.y - incoming.y * outgoing.x;
+
+    if (incomingLength === 0 || outgoingLength === 0 || Math.abs(cross) < 0.0001) {
+      if (!samePoint(rounded.at(-1)!, corner)) rounded.push({ ...corner });
+      continue;
+    }
+
+    const cornerRadius = Math.min(radius, incomingLength / 2, outgoingLength / 2);
+    const before = {
+      x: corner.x - (incoming.x / incomingLength) * cornerRadius,
+      y: corner.y - (incoming.y / incomingLength) * cornerRadius,
+    };
+    const after = {
+      x: corner.x + (outgoing.x / outgoingLength) * cornerRadius,
+      y: corner.y + (outgoing.y / outgoingLength) * cornerRadius,
+    };
+    if (!samePoint(rounded.at(-1)!, before)) rounded.push(before);
+
+    for (let sample = 1; sample <= samplesPerCorner; sample += 1) {
+      const t = sample / samplesPerCorner;
+      const inverse = 1 - t;
+      rounded.push({
+        x: inverse * inverse * before.x + 2 * inverse * t * corner.x + t * t * after.x,
+        y: inverse * inverse * before.y + 2 * inverse * t * corner.y + t * t * after.y,
+      });
+    }
+  }
+
+  const last = points.at(-1)!;
+  if (!samePoint(rounded.at(-1)!, last)) rounded.push({ ...last });
+  return rounded;
+}
+
 function columnIndex(table: Table, columnId: string): number {
   return Math.max(0, table.columns.findIndex((column) => column.id === columnId));
 }

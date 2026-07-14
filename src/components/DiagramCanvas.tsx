@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Application, Container, FederatedPointerEvent, Graphics, Text, TextStyle } from "pixi.js";
 import RBush from "rbush";
 import {
-  buildRelationshipGeometry, connectedRelationshipIds, relationshipAnimationEnabled, type AnchorSide, type Point,
+  buildRelationshipGeometry, connectedRelationshipIds, relationshipAnimationEnabled, roundedOrthogonalPath, type AnchorSide, type Point,
 } from "../domain/relationshipGeometry";
 import type { LayoutNode, LayoutResult, Relationship, SchemaDocument } from "../domain/types";
 import { assignTableToArea, updateArea, updateNote, updateTable } from "../domain/schemaActions";
@@ -309,7 +309,16 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     const connectedColumnIds = new Set<string>();
     const connectedPortSides = new Map<string, Set<AnchorSide>>();
     const edgeLayer = new Container();
-    const edgeRenders = new Map<string, { relationship: Relationship; graphics: Graphics; sourceBadge: Container; targetBadge: Container; active: boolean }>();
+    const edgeRenders = new Map<string, {
+      relationship: Relationship;
+      graphics: Graphics;
+      sourceBadge: Container;
+      targetBadge: Container;
+      sourceBadgePoint: Point;
+      targetBadgePoint: Point;
+      points: Point[];
+      active: boolean;
+    }>();
 
     const addPortSide = (columnId: string, side: AnchorSide) => {
       const sides = connectedPortSides.get(columnId) ?? new Set<AnchorSide>();
@@ -334,20 +343,34 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       const sourceBadge = createCardinalityBadge(geometry.sourceCardinality, active);
       const targetBadge = createCardinalityBadge(geometry.targetCardinality, active);
       edgeLayer.addChild(graphics, sourceBadge, targetBadge);
-      edgeRenders.set(relationship.id, { relationship, graphics, sourceBadge, targetBadge, active });
+      edgeRenders.set(relationship.id, {
+        relationship,
+        graphics,
+        sourceBadge,
+        targetBadge,
+        sourceBadgePoint: geometry.sourceBadge,
+        targetBadgePoint: geometry.targetBadge,
+        points: roundedOrthogonalPath(geometry.points),
+        active,
+      });
     });
 
     let dashPhase = 0;
-    const redrawRelationship = (relationshipId: string) => {
+    const redrawRelationship = (relationshipId: string, recalculateGeometry = false) => {
       const render = edgeRenders.get(relationshipId);
       if (!render) return;
-      const geometry = buildRelationshipGeometry(document, render.relationship, nodeById);
-      if (!geometry) return;
+      if (recalculateGeometry) {
+        const geometry = buildRelationshipGeometry(document, render.relationship, nodeById);
+        if (!geometry) return;
+        render.points = roundedOrthogonalPath(geometry.points);
+        render.sourceBadgePoint = geometry.sourceBadge;
+        render.targetBadgePoint = geometry.targetBadge;
+      }
       render.graphics.clear();
-      if (render.active) drawDashedRoute(render.graphics, geometry.points, dashPhase, 0xaab9d0, 3);
-      else drawSolidRoute(render.graphics, geometry.points, colors.edge, 2);
-      render.sourceBadge.position.set(geometry.sourceBadge.x, geometry.sourceBadge.y);
-      render.targetBadge.position.set(geometry.targetBadge.x, geometry.targetBadge.y);
+      if (render.active) drawDashedRoute(render.graphics, render.points, dashPhase, 0xaab9d0, 3);
+      else drawSolidRoute(render.graphics, render.points, colors.edge, 2);
+      render.sourceBadge.position.set(render.sourceBadgePoint.x, render.sourceBadgePoint.y);
+      render.targetBadge.position.set(render.targetBadgePoint.x, render.targetBadgePoint.y);
     };
 
     edgeRenders.forEach((_render, relationshipId) => redrawRelationship(relationshipId));
@@ -357,7 +380,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     if (relationshipAnimationEnabled(activeRelationshipIds.size, reducedMotion)) {
       const animateRelationships = () => {
         dashPhase += app.ticker.deltaMS * 0.045;
-        activeRelationshipIds.forEach(redrawRelationship);
+        activeRelationshipIds.forEach((relationshipId) => redrawRelationship(relationshipId));
       };
       app.ticker.add(animateRelationships);
       tickerCleanupRef.current = () => app.ticker.remove(animateRelationships);
@@ -391,7 +414,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
         node.y = y;
         document.relationships
           .filter((relationship) => relationship.sourceTableId === table.id || relationship.targetTableId === table.id)
-          .forEach((relationship) => redrawRelationship(relationship.id));
+          .forEach((relationship) => redrawRelationship(relationship.id, true));
       });
       const finishTableDrag = () => {
         if (!dragging) return;

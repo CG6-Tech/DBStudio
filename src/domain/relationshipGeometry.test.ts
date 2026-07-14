@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseSchema } from "./parser";
-import { buildRelationshipGeometry, connectedRelationshipIds, fieldAnchor, relationshipAnimationEnabled, relationshipCardinality } from "./relationshipGeometry";
+import { buildRelationshipGeometry, connectedRelationshipIds, fieldAnchor, relationshipAnimationEnabled, relationshipCardinality, roundedOrthogonalPath } from "./relationshipGeometry";
 import type { LayoutNode } from "./types";
 
 const sql = `CREATE TABLE users (
@@ -63,5 +63,36 @@ describe("relationship geometry", () => {
     const node = nodes(document).get(document.tables[0].id)!;
     expect(fieldAnchor(node, document.tables[0], document.tables[0].columns[0].id, "left").point.x).toBe(500);
     expect(fieldAnchor(node, document.tables[0], document.tables[0].columns[0].id, "right").point.x).toBe(760);
+  });
+
+  it("rounds horizontal-to-vertical and vertical-to-horizontal elbows", () => {
+    const rounded = roundedOrthogonalPath([
+      { x: 0, y: 0 },
+      { x: 40, y: 0 },
+      { x: 40, y: 50 },
+      { x: 80, y: 50 },
+    ], 12, 6);
+    expect(rounded[0]).toEqual({ x: 0, y: 0 });
+    expect(rounded.at(-1)).toEqual({ x: 80, y: 50 });
+    expect(rounded).toContainEqual({ x: 28, y: 0 });
+    expect(rounded).toContainEqual({ x: 40, y: 12 });
+    expect(rounded).toContainEqual({ x: 40, y: 38 });
+    expect(rounded).toContainEqual({ x: 52, y: 50 });
+  });
+
+  it("clamps the radius to short adjacent segments", () => {
+    const rounded = roundedOrthogonalPath([
+      { x: 0, y: 0 },
+      { x: 8, y: 0 },
+      { x: 8, y: 6 },
+    ], 12, 2);
+    expect(rounded).toContainEqual({ x: 5, y: 0 });
+    expect(rounded.at(-1)).toEqual({ x: 8, y: 6 });
+    expect(rounded.every((point) => point.x >= 0 && point.x <= 8 && point.y >= 0 && point.y <= 6)).toBe(true);
+  });
+
+  it("leaves a straight route unchanged", () => {
+    const points = [{ x: 0, y: 0 }, { x: 30, y: 0 }, { x: 80, y: 0 }];
+    expect(roundedOrthogonalPath(points)).toEqual(points);
   });
 });

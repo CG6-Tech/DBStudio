@@ -5,7 +5,8 @@ export type Operation =
   | { kind: "renameTable"; tableId: string; previous: string; next: string }
   | { kind: "renameColumn"; tableId: string; columnId: string; previous: string; next: string }
   | { kind: "changeType"; tableId: string; columnId: string; previous: string; next: string }
-  | { kind: "changeNullability"; tableId: string; columnId: string; previous: boolean; next: boolean };
+  | { kind: "changeNullability"; tableId: string; columnId: string; previous: boolean; next: boolean }
+  | { kind: "replaceDocument"; label: string; previous: SchemaDocument; next: SchemaDocument };
 
 export interface OperationState {
   document: SchemaDocument;
@@ -18,6 +19,7 @@ function updateTable(document: SchemaDocument, tableId: string, update: (table: 
 }
 
 export function applyOperation(document: SchemaDocument, operation: Operation): SchemaDocument {
+  if (operation.kind === "replaceDocument") return operation.next;
   return updateTable(document, operation.tableId, (table) => {
     if (operation.kind === "renameTable") return { ...table, name: operation.next };
     return {
@@ -33,6 +35,9 @@ export function applyOperation(document: SchemaDocument, operation: Operation): 
 }
 
 export function invertOperation(operation: Operation): Operation {
+  if (operation.kind === "replaceDocument") {
+    return { ...operation, previous: operation.next, next: operation.previous };
+  }
   return { ...operation, previous: operation.next, next: operation.previous } as Operation;
 }
 
@@ -78,13 +83,48 @@ function columnPatches(column: Column): Patch[] {
   return patches;
 }
 
+function renderTable(document: SchemaDocument, table: Table): string {
+  const relationshipByColumn = new Map(
+    document.relationships
+      .filter((relationship) => relationship.sourceTableId === table.id)
+      .map((relationship) => [relationship.sourceColumnId, relationship]),
+  );
+  const lines = table.columns.map((column) => {
+    const parts = [`  ${quoteIdentifier(column.name)}`, column.dataType.trim()];
+    if (!column.nullable) parts.push("NOT NULL");
+    if (column.primaryKey) parts.push("PRIMARY KEY");
+    if (column.unique && !column.primaryKey) parts.push("UNIQUE");
+    if (column.defaultExpression) parts.push(`DEFAULT ${column.defaultExpression}`);
+    const relationship = relationshipByColumn.get(column.id);
+    if (relationship) {
+      const targetTable = document.tables.find((item) => item.id === relationship.targetTableId);
+      const targetColumn = targetTable?.columns.find((item) => item.id === relationship.targetColumnId);
+      if (targetTable && targetColumn) parts.push(`REFERENCES ${quoteIdentifier(targetTable.name)}(${quoteIdentifier(targetColumn.name)})`);
+    }
+    return parts.join(" ");
+  });
+  const qualifiedName = table.schema ? `${quoteIdentifier(table.schema)}.${quoteIdentifier(table.name)}` : quoteIdentifier(table.name);
+  return `CREATE TABLE ${qualifiedName} (\n${lines.join(",\n")}\n);`;
+}
+
 export function generateSql(document: SchemaDocument): string {
   const patches: Patch[] = [];
+  const insertions: string[] = [];
   document.tables.forEach((table) => {
+    if (table.isNew) {
+      insertions.push(renderTable(document, table));
+      return;
+    }
+    if (document.structuralTableIds.includes(table.id)) {
+      patches.push({ ...table.statementRange, value: renderTable(document, table) });
+      return;
+    }
     if (table.name !== table.originalName) patches.push({ ...table.nameRange, value: quoteIdentifier(table.name) });
     table.columns.forEach((column) => patches.push(...columnPatches(column)));
   });
+  document.removedStatementRanges.forEach((range) => patches.push({ ...range, value: "" }));
   document.relationships.forEach((relationship) => {
+    if (document.structuralTableIds.includes(relationship.sourceTableId)) return;
     const sourceTable = document.tables.find((table) => table.id === relationship.sourceTableId);
     const targetTable = document.tables.find((table) => table.id === relationship.targetTableId);
     const sourceColumn = sourceTable?.columns.find((column) => column.id === relationship.sourceColumnId);
@@ -103,7 +143,8 @@ export function generateSql(document: SchemaDocument): string {
   for (let index = 1; index < patches.length; index += 1) {
     if (patches[index - 1].start < patches[index].end) throw new Error("Overlapping SQL patches cannot be saved safely.");
   }
-  return patches.reduce((sql, patch) => sql.slice(0, patch.start) + patch.value + sql.slice(patch.end), document.source);
+  const patched = patches.reduce((sql, patch) => sql.slice(0, patch.start) + patch.value + sql.slice(patch.end), document.source);
+  return insertions.length ? `${patched.trimEnd()}\n\n${insertions.join("\n\n")}\n` : patched;
 }
 
 export function validateIdentifier(value: string, document: SchemaDocument, currentId: string): string | null {

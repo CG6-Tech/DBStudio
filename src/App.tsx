@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DiagramCanvas } from "./components/DiagramCanvas";
-import { Inspector } from "./components/Inspector";
+import { CanvasToolbar } from "./components/CanvasToolbar";
 import { SqlPreview } from "./components/SqlPreview";
 import { Toolbar } from "./components/Toolbar";
+import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { commitOperation, generateSql, redo, undo, type Operation, type OperationState } from "./domain/operations";
 import { parseSchema } from "./domain/parser";
 import type { FileIdentity, OpenedDocument } from "./domain/types";
 import { useLayout } from "./layout/useLayout";
 import { desktopAvailable, loadExample, openSqlFile, saveSqlFile } from "./platform/desktop";
+import { applyMetadata, loadMetadata, saveMetadata } from "./platform/metadata";
 import { useUiStore } from "./state/uiStore";
 
 function documentTitle(file: FileIdentity | null): string {
@@ -20,7 +22,6 @@ export function App() {
   const [file, setFile] = useState<FileIdentity | null>(null);
   const [busy, setBusy] = useState(true);
   const [fatalError, setFatalError] = useState<string | null>(null);
-  const selection = useUiStore((state) => state.selection);
   const setSelection = useUiStore((state) => state.setSelection);
   const previewOpen = useUiStore((state) => state.previewOpen);
   const setPreviewOpen = useUiStore((state) => state.setPreviewOpen);
@@ -30,8 +31,8 @@ export function App() {
   const document = history?.document ?? null;
   const layout = useLayout(document);
 
-  const acceptOpenedDocument = useCallback((opened: OpenedDocument) => {
-    const parsed = parseSchema(opened.source);
+  const acceptOpenedDocument = useCallback(async (opened: OpenedDocument) => {
+    const parsed = applyMetadata(parseSchema(opened.source), await loadMetadata(opened.path));
     if (parsed.tables.length === 0) throw new Error("No supported CREATE TABLE statements were found.");
     setHistory({ document: parsed, past: [], future: [] });
     setFile({ path: opened.path, hash: opened.hash, modifiedMs: opened.modifiedMs, isExample: opened.isExample });
@@ -43,7 +44,7 @@ export function App() {
   const showExample = useCallback(async () => {
     setBusy(true);
     try {
-      acceptOpenedDocument(await loadExample());
+      await acceptOpenedDocument(await loadExample());
     } catch (error) {
       setFatalError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -57,7 +58,7 @@ export function App() {
     try {
       setBusy(true);
       const opened = await openSqlFile();
-      if (opened) acceptOpenedDocument(opened);
+      if (opened) await acceptOpenedDocument(opened);
     } catch (error) {
       setFatalError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -89,7 +90,13 @@ export function App() {
         setStatus("Save cancelled");
         return;
       }
-      const reparsed = parseSchema(candidateSql);
+      await saveMetadata(desktopAvailable() ? result.path : null, document);
+      const reparsed = applyMetadata(parseSchema(candidateSql), {
+        version: 1,
+        tables: document.tables.map((table) => ({ name: table.name, position: table.position, color: table.color, collapsed: table.collapsed })),
+        areas: document.areas,
+        notes: document.notes,
+      });
       setHistory({ document: reparsed, past: [], future: [] });
       setFile({ path: desktopAvailable() ? result.path : null, hash: result.hash, modifiedMs: result.modifiedMs, isExample: !desktopAvailable() });
       setStatus(result.backupPath ? `Saved · backup created` : "Saved");
@@ -129,11 +136,28 @@ export function App() {
         onSave={() => void saveFile()}
       />
       <section className="workspace">
+        {document && <WorkspaceSidebar
+          document={document}
+          operations={history?.past ?? []}
+          fileName={documentTitle(file)}
+          onOpen={() => void openFile()}
+          onReplace={(label, next) => {
+            if (!history) return;
+            apply({ kind: "replaceDocument", label, previous: history.document, next });
+          }}
+        />}
         <div className="diagram-region">
-          {document && layout ? <DiagramCanvas document={document} layout={layout} /> : <div className="loading-state"><span />Preparing diagram…</div>}
+          {document && layout ? <DiagramCanvas
+            document={document}
+            layout={layout}
+            onReplace={(label, next) => {
+              if (!history) return;
+              apply({ kind: "replaceDocument", label, previous: history.document, next });
+            }}
+          /> : <div className="loading-state"><span />Preparing diagram…</div>}
+          <CanvasToolbar onFit={requestFit} />
           {document && <SqlPreview open={previewOpen} sql={candidateSql} changes={history?.past.length ?? 0} onClose={() => setPreviewOpen(false)} />}
         </div>
-        {document && <Inspector document={document} selection={selection} onOperation={apply} />}
       </section>
       <footer className="statusbar">
         <div><span className={busy ? "status-pulse busy" : "status-pulse"} />{status}</div>

@@ -2,7 +2,7 @@
 
 A minimal, source-preserving PostgreSQL ER editor built with the production stack: Tauri 2, Rust, React, TypeScript, PixiJS 8, RBush, ELK.js, Zustand, and `libpg_query` through the Rust `pg_query` crate.
 
-The sample opens two related tables, lets you edit supported table and column properties, previews source-preserving SQL patches, and safely saves local SQL files with validation and backups.
+The sample opens two related tables and provides a dark, canvas-first workspace for editing schema structure and layout. Tables can be moved freely, colored, and grouped inside movable, resizable colored areas. The workspace also supports notes, relationship editing, SQL preview, undo/redo, and safe local saves.
 
 ## Run the browser preview
 
@@ -32,4 +32,13 @@ npm run build
 cd src-tauri && cargo test
 ```
 
-The MVP supports `CREATE TABLE`, columns, primary keys, and single-column foreign keys. It can rename tables and columns, change column types, and toggle nullability. Structural additions and deletions are intentionally deferred.
+## Current sample scope
+
+- Add, rename, recolor, and delete tables and fields.
+- Edit PostgreSQL field types, primary keys, nullability, and relationships.
+- Drag tables freely around the PixiJS canvas.
+- Create, move, resize, recolor, lock, and delete grouping areas.
+- Drop tables into an area; moving the area can move its grouped tables.
+- Add colored canvas notes.
+- Persist canvas metadata in `workspace.sql-erd.json` beside the SQL file.
+- Preview generated SQL and save with parser validation, external-change protection, backups, and atomic replacement.

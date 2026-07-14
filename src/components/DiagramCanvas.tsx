@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Application, Container, FederatedPointerEvent, Graphics, Text, TextStyle } from "pixi.js";
 import RBush from "rbush";
 import type { LayoutResult, SchemaDocument } from "../domain/types";
+import { assignTableToArea, updateArea, updateNote, updateTable } from "../domain/schemaActions";
 import { useUiStore } from "../state/uiStore";
 
 interface SpatialItem {
@@ -15,6 +16,7 @@ interface SpatialItem {
 interface DiagramCanvasProps {
   document: SchemaDocument;
   layout: LayoutResult;
+  onReplace: (label: string, next: SchemaDocument) => void;
 }
 
 const colors = {
@@ -36,7 +38,11 @@ const columnStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", 
 const typeStyle = new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, fill: colors.type });
 const badgeStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 9, fontWeight: "700", fill: colors.key });
 
-export function DiagramCanvas({ document, layout }: DiagramCanvasProps) {
+function colorNumber(value: string): number {
+  return Number.parseInt(value.replace("#", ""), 16);
+}
+
+export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
   const worldRef = useRef<Container | null>(null);
@@ -115,9 +121,13 @@ export function DiagramCanvas({ document, layout }: DiagramCanvasProps) {
     if (!app || !world) return;
     world.removeChildren().forEach((child) => child.destroy({ children: true }));
 
-    const nodeById = new Map(layout.nodes.map((node) => [node.id, node]));
+    const effectiveNodes = layout.nodes.map((node) => {
+      const table = document.tables.find((item) => item.id === node.id);
+      return table && (table.position.x !== 0 || table.position.y !== 0) ? { ...node, ...table.position } : node;
+    });
+    const nodeById = new Map(effectiveNodes.map((node) => [node.id, node]));
     const index = new RBush<SpatialItem>();
-    index.load(layout.nodes.map((node) => ({ minX: node.x, minY: node.y, maxX: node.x + node.width, maxY: node.y + node.height, id: node.id })));
+    index.load(effectiveNodes.map((node) => ({ minX: node.x, minY: node.y, maxX: node.x + node.width, maxY: node.y + node.height, id: node.id })));
     const viewport = viewportRef.current;
     const visible = new Set(index.search({
       minX: -viewport.x / viewport.scale - 200,
@@ -125,6 +135,114 @@ export function DiagramCanvas({ document, layout }: DiagramCanvasProps) {
       maxX: (app.screen.width - viewport.x) / viewport.scale + 200,
       maxY: (app.screen.height - viewport.y) / viewport.scale + 200,
     }).map((item) => item.id));
+
+    document.areas.forEach((area) => {
+      const areaContainer = new Container();
+      areaContainer.position.set(area.x, area.y);
+      areaContainer.eventMode = area.locked ? "none" : "static";
+      areaContainer.cursor = area.locked ? "default" : "move";
+      const fill = colorNumber(area.color);
+      const shape = new Graphics().roundRect(0, 0, area.width, area.height, 12).fill({ color: fill, alpha: 0.14 }).stroke({ color: fill, alpha: 1, width: 3 });
+      areaContainer.addChild(shape);
+      const areaHeader = new Graphics().roundRect(0, 0, area.width, 42, 12).fill({ color: fill, alpha: 0.22 }).rect(0, 22, area.width, 20).fill({ color: fill, alpha: 0.22 });
+      areaContainer.addChild(areaHeader);
+      const label = new Text({ text: area.name, style: new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 14, fontWeight: "600", fill }) });
+      label.position.set(16, 12);
+      areaContainer.addChild(label);
+      const resizeHandle = new Graphics().roundRect(0, 0, 12, 12, 3).fill({ color: fill, alpha: 0.9 });
+      resizeHandle.position.set(area.width - 18, area.height - 18);
+      resizeHandle.eventMode = area.locked ? "none" : "static";
+      resizeHandle.cursor = "nwse-resize";
+      areaContainer.addChild(resizeHandle);
+      let resizing = false;
+      let resizeStart = { x: 0, y: 0, width: area.width, height: area.height };
+      let currentSize = { width: area.width, height: area.height };
+      resizeHandle.on("pointerdown", (event: FederatedPointerEvent) => {
+        event.stopPropagation();
+        resizing = true;
+        resizeStart = { x: event.global.x, y: event.global.y, width: area.width, height: area.height };
+      });
+      resizeHandle.on("pointermove", (event: FederatedPointerEvent) => {
+        if (!resizing) return;
+        event.stopPropagation();
+        const scale = viewportRef.current.scale;
+        currentSize = {
+          width: Math.max(220, resizeStart.width + (event.global.x - resizeStart.x) / scale),
+          height: Math.max(140, resizeStart.height + (event.global.y - resizeStart.y) / scale),
+        };
+        shape.clear().roundRect(0, 0, currentSize.width, currentSize.height, 12).fill({ color: fill, alpha: 0.14 }).stroke({ color: fill, alpha: 1, width: 3 });
+        areaHeader.clear().roundRect(0, 0, currentSize.width, 42, 12).fill({ color: fill, alpha: 0.22 }).rect(0, 22, currentSize.width, 20).fill({ color: fill, alpha: 0.22 });
+        resizeHandle.position.set(currentSize.width - 18, currentSize.height - 18);
+      });
+      const finishResize = () => {
+        if (!resizing) return;
+        resizing = false;
+        onReplace("Resize area", updateArea(document, area.id, currentSize));
+      };
+      resizeHandle.on("pointerup", finishResize);
+      resizeHandle.on("pointerupoutside", finishResize);
+      let dragging = false;
+      let start = { x: 0, y: 0, areaX: area.x, areaY: area.y };
+      areaContainer.on("pointerdown", (event: FederatedPointerEvent) => {
+        event.stopPropagation();
+        dragging = true;
+        start = { x: event.global.x, y: event.global.y, areaX: area.x, areaY: area.y };
+      });
+      areaContainer.on("pointermove", (event: FederatedPointerEvent) => {
+        if (!dragging) return;
+        const scale = viewportRef.current.scale;
+        areaContainer.position.set(start.areaX + (event.global.x - start.x) / scale, start.areaY + (event.global.y - start.y) / scale);
+      });
+      const finishAreaDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        const dx = areaContainer.x - area.x;
+        const dy = areaContainer.y - area.y;
+        let next = updateArea(document, area.id, { x: areaContainer.x, y: areaContainer.y });
+        if (area.moveContents && (dx !== 0 || dy !== 0)) {
+          area.tableIds.forEach((tableId) => {
+            const table = next.tables.find((item) => item.id === tableId);
+            if (table) next = updateTable(next, tableId, { position: { x: table.position.x + dx, y: table.position.y + dy } });
+          });
+        }
+        onReplace("Move area", next);
+      };
+      areaContainer.on("pointerup", finishAreaDrag);
+      areaContainer.on("pointerupoutside", finishAreaDrag);
+      world.addChild(areaContainer);
+    });
+
+    document.notes.forEach((note) => {
+      const noteContainer = new Container();
+      noteContainer.position.set(note.x, note.y);
+      noteContainer.eventMode = "static";
+      noteContainer.cursor = "move";
+      const fill = colorNumber(note.color);
+      noteContainer.addChild(new Graphics().roundRect(0, 0, 220, 110, 10).fill({ color: fill, alpha: 0.2 }).stroke({ color: fill, alpha: 0.9, width: 2 }));
+      const text = new Text({ text: note.text, style: new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, lineHeight: 19, fill: colors.text, wordWrap: true, wordWrapWidth: 188 }) });
+      text.position.set(16, 15);
+      noteContainer.addChild(text);
+      let dragging = false;
+      let start = { x: 0, y: 0, noteX: note.x, noteY: note.y };
+      noteContainer.on("pointerdown", (event: FederatedPointerEvent) => {
+        event.stopPropagation();
+        dragging = true;
+        start = { x: event.global.x, y: event.global.y, noteX: note.x, noteY: note.y };
+      });
+      noteContainer.on("pointermove", (event: FederatedPointerEvent) => {
+        if (!dragging) return;
+        const scale = viewportRef.current.scale;
+        noteContainer.position.set(start.noteX + (event.global.x - start.x) / scale, start.noteY + (event.global.y - start.y) / scale);
+      });
+      const finishNoteDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        onReplace("Move note", updateNote(document, note.id, { x: noteContainer.x, y: noteContainer.y }));
+      };
+      noteContainer.on("pointerup", finishNoteDrag);
+      noteContainer.on("pointerupoutside", finishNoteDrag);
+      world.addChild(noteContainer);
+    });
 
     const edgeLayer = new Graphics();
     document.relationships.forEach((relationship) => {
@@ -156,13 +274,45 @@ export function DiagramCanvas({ document, layout }: DiagramCanvasProps) {
       card.position.set(node.x, node.y);
       card.eventMode = "static";
       card.cursor = "pointer";
-      card.on("pointertap", () => setSelection({ kind: "table", tableId: table.id }));
+      let dragging = false;
+      let moved = false;
+      let dragStart = { x: 0, y: 0, cardX: node.x, cardY: node.y };
+      card.on("pointerdown", (event: FederatedPointerEvent) => {
+        event.stopPropagation();
+        dragging = true;
+        moved = false;
+        dragStart = { x: event.global.x, y: event.global.y, cardX: card.x, cardY: card.y };
+      });
+      card.on("pointermove", (event: FederatedPointerEvent) => {
+        if (!dragging) return;
+        const scale = viewportRef.current.scale;
+        const x = dragStart.cardX + (event.global.x - dragStart.x) / scale;
+        const y = dragStart.cardY + (event.global.y - dragStart.y) / scale;
+        moved ||= Math.abs(x - dragStart.cardX) + Math.abs(y - dragStart.cardY) > 2;
+        card.position.set(x, y);
+      });
+      const finishTableDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        if (!moved) {
+          setSelection({ kind: "table", tableId: table.id });
+          return;
+        }
+        let next = updateTable(document, table.id, { position: { x: card.x, y: card.y } });
+        const center = { x: card.x + node.width / 2, y: card.y + node.height / 2 };
+        const targetArea = [...document.areas].reverse().find((area) => !area.locked && center.x >= area.x && center.x <= area.x + area.width && center.y >= area.y && center.y <= area.y + area.height);
+        next = assignTableToArea(next, table.id, targetArea?.id ?? null);
+        onReplace(targetArea ? `Move table into ${targetArea.name}` : "Move table", next);
+      };
+      card.on("pointerup", finishTableDrag);
+      card.on("pointerupoutside", finishTableDrag);
 
       const background = new Graphics()
         .roundRect(0, 0, node.width, node.height, 10)
         .fill(colors.card)
-        .stroke({ color: tableSelected ? colors.selected : colors.border, width: tableSelected ? 2 : 1 });
+        .stroke({ color: tableSelected ? colorNumber(table.color) : colors.border, width: tableSelected ? 2 : 1 });
       background.roundRect(0, 0, node.width, 50, 10).fill(colors.cardTop);
+      background.rect(0, 0, node.width, 5).fill(colorNumber(table.color));
       background.rect(0, 40, node.width, 10).fill(colors.cardTop);
       background.moveTo(0, 50).lineTo(node.width, 50).stroke({ color: colors.border, width: 1 });
       card.addChild(background);
@@ -207,16 +357,20 @@ export function DiagramCanvas({ document, layout }: DiagramCanvasProps) {
       });
       world.addChild(card);
     });
-  }, [document, layout, selection, setSelection, rendererReady, viewportVersion]);
+  }, [document, layout, selection, setSelection, rendererReady, viewportVersion, onReplace]);
 
   useEffect(() => {
     const app = appRef.current;
     const world = worldRef.current;
     if (!app || !world || layout.nodes.length === 0) return;
-    const minX = Math.min(...layout.nodes.map((node) => node.x));
-    const minY = Math.min(...layout.nodes.map((node) => node.y));
-    const maxX = Math.max(...layout.nodes.map((node) => node.x + node.width));
-    const maxY = Math.max(...layout.nodes.map((node) => node.y + node.height));
+    const fittedNodes = layout.nodes.map((node) => {
+      const table = document.tables.find((item) => item.id === node.id);
+      return table && (table.position.x !== 0 || table.position.y !== 0) ? { ...node, ...table.position } : node;
+    });
+    const minX = Math.min(...fittedNodes.map((node) => node.x), ...document.areas.map((area) => area.x), ...document.notes.map((note) => note.x));
+    const minY = Math.min(...fittedNodes.map((node) => node.y), ...document.areas.map((area) => area.y), ...document.notes.map((note) => note.y));
+    const maxX = Math.max(...fittedNodes.map((node) => node.x + node.width), ...document.areas.map((area) => area.x + area.width), ...document.notes.map((note) => note.x + 220));
+    const maxY = Math.max(...fittedNodes.map((node) => node.y + node.height), ...document.areas.map((area) => area.y + area.height), ...document.notes.map((note) => note.y + 110));
     const scale = Math.min(1.15, Math.max(0.35, Math.min((app.screen.width - 140) / (maxX - minX), (app.screen.height - 140) / (maxY - minY))));
     const viewport = viewportRef.current;
     viewport.scale = scale;
@@ -225,12 +379,17 @@ export function DiagramCanvas({ document, layout }: DiagramCanvasProps) {
     world.scale.set(scale);
     world.position.set(viewport.x, viewport.y);
     setViewportVersion((version) => version + 1);
-  }, [fitRequest, layout, rendererReady]);
+  }, [fitRequest, layout, rendererReady, document]);
 
   return (
     <div className="canvas-shell" ref={hostRef}>
       <div className="canvas-hint">Drag to pan · Scroll to zoom · Click a field to edit</div>
       <div className="zoom-badge">PIXIJ‍S · RBUSH · ELK</div>
+      <div className="minimap" aria-label="Workspace minimap">
+        {document.areas.map((area) => <i key={area.id} style={{ left: `${Math.max(0, Math.min(85, area.x / 14))}%`, top: `${Math.max(0, Math.min(75, area.y / 10))}%`, width: `${Math.max(10, area.width / 16)}px`, height: `${Math.max(8, area.height / 18)}px`, borderColor: area.color }} />)}
+        {document.notes.map((note) => <em key={note.id} style={{ left: `${Math.max(2, Math.min(88, note.x / 14))}%`, top: `${Math.max(2, Math.min(80, note.y / 10))}%`, background: note.color }} />)}
+        {document.tables.map((table, index) => <b key={table.id} style={{ left: `${Math.max(4, Math.min(90, (table.position.x || index * 300) / 14))}%`, top: `${Math.max(4, Math.min(82, (table.position.y || index * 120) / 10))}%`, background: table.color }} />)}
+      </div>
     </div>
   );
 }

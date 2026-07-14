@@ -181,7 +181,13 @@ export function parseSchema(source: string): SchemaDocument {
       schema,
       columns: [],
       nameRange: { start: nameToken.start, end: nameToken.end },
+      statementRange: {
+        start: tokens[cursor].start,
+        end: tokens[closeIndex + 1]?.text === ";" ? tokens[closeIndex + 1].end : tokens[closeIndex].end,
+      },
       position: { x: 0, y: 0 },
+      color: "#7ee0b5",
+      collapsed: false,
     };
     const tablePrimaryKeys = new Set<string>();
 
@@ -231,6 +237,13 @@ export function parseSchema(source: string): SchemaDocument {
       const typeRange = { start: typeTokens[0].start, end: typeTokens.at(-1)!.end };
       const notNullIndex = findSequence(definition, ["NOT", "NULL"]);
       const primaryKey = findSequence(definition, ["PRIMARY", "KEY"]) >= 0;
+      const defaultIndex = definition.findIndex((token) => token.upper === "DEFAULT");
+      const defaultStop = defaultIndex >= 0
+        ? definition.findIndex((token, index) => index > defaultIndex && ["REFERENCES", "CONSTRAINT", "CHECK", "UNIQUE", "PRIMARY", "NOT"].includes(token.upper))
+        : -1;
+      const defaultTokens = defaultIndex >= 0
+        ? definition.slice(defaultIndex + 1, defaultStop >= 0 ? defaultStop : definition.length)
+        : [];
       const columnId = `${tableId}:column:${stablePart(columnName)}:${definition[0].start}`;
       const column: Column = {
         id: columnId,
@@ -242,6 +255,8 @@ export function parseSchema(source: string): SchemaDocument {
         nullable: notNullIndex < 0 && !primaryKey,
         originalNullable: notNullIndex < 0 && !primaryKey,
         primaryKey,
+        unique: definition.some((token) => token.upper === "UNIQUE"),
+        defaultExpression: defaultTokens.length > 0 ? source.slice(defaultTokens[0].start, defaultTokens.at(-1)!.end) : undefined,
         nameRange: { start: definition[0].start, end: definition[0].end },
         typeRange,
         notNullRange: notNullIndex >= 0 ? { start: definition[notNullIndex].start, end: definition[notNullIndex + 1].end } : undefined,
@@ -302,7 +317,16 @@ export function parseSchema(source: string): SchemaDocument {
     }
   });
 
-  return { source, tables, relationships, diagnostics };
+  return {
+    source,
+    tables,
+    relationships,
+    diagnostics,
+    areas: [],
+    notes: [],
+    structuralTableIds: [],
+    removedStatementRanges: [],
+  };
 }
 
 export function quoteIdentifier(value: string): string {

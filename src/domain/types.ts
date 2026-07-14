@@ -16,6 +16,9 @@ export interface Column {
   nameRange: SourceRange;
   typeRange: SourceRange;
   notNullRange?: SourceRange;
+  unique: boolean;
+  defaultExpression?: string;
+  isNew?: boolean;
 }
 
 export interface Table {
@@ -25,7 +28,33 @@ export interface Table {
   schema?: string;
   columns: Column[];
   nameRange: SourceRange;
+  statementRange: SourceRange;
   position: { x: number; y: number };
+  color: string;
+  collapsed: boolean;
+  isNew?: boolean;
+}
+
+export interface DiagramArea {
+  id: string;
+  name: string;
+  color: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  tableIds: string[];
+  locked: boolean;
+  collapsed: boolean;
+  moveContents: boolean;
+}
+
+export interface DiagramNote {
+  id: string;
+  text: string;
+  color: string;
+  x: number;
+  y: number;
 }
 
 export interface Relationship {
@@ -50,6 +79,10 @@ export interface SchemaDocument {
   tables: Table[];
   relationships: Relationship[];
   diagnostics: Diagnostic[];
+  areas: DiagramArea[];
+  notes: DiagramNote[];
+  structuralTableIds: string[];
+  removedStatementRanges: SourceRange[];
 }
 
 export interface FileIdentity {

@@ -73,6 +73,11 @@ fn backup_path(path: &Path) -> Result<PathBuf, String> {
     )))
 }
 
+fn metadata_path(path: &Path) -> Result<PathBuf, String> {
+    let parent = path.parent().ok_or_else(|| "The SQL file has no parent folder.".to_string())?;
+    Ok(parent.join("workspace.sql-erd.json"))
+}
+
 fn safe_save(path: &Path, source: &str, original_hash: Option<&str>) -> Result<SaveResult, String> {
     validate_postgres(source)?;
     let parent = path
@@ -142,6 +147,25 @@ fn open_document(path: String) -> Result<OpenedDocument, String> {
     read_document(Path::new(&path))
 }
 
+#[tauri::command]
+fn load_workspace_metadata(path: String) -> Result<Option<String>, String> {
+    let metadata = metadata_path(Path::new(&path))?;
+    if !metadata.exists() {
+        return Ok(None);
+    }
+    fs::read_to_string(&metadata)
+        .map(Some)
+        .map_err(|error| format!("Could not read {}: {error}", metadata.display()))
+}
+
+#[tauri::command]
+fn save_workspace_metadata(path: String, json: String) -> Result<(), String> {
+    let metadata = metadata_path(Path::new(&path))?;
+    let temp = metadata.with_extension("json.tmp");
+    fs::write(&temp, json).map_err(|error| format!("Could not write diagram metadata: {error}"))?;
+    fs::rename(&temp, &metadata).map_err(|error| format!("Could not replace diagram metadata: {error}"))
+}
+
 #[tauri::command(rename_all = "camelCase")]
 fn save_document(path: String, source: String, original_hash: Option<String>) -> Result<SaveResult, String> {
     safe_save(Path::new(&path), &source, original_hash.as_deref())
@@ -175,13 +199,20 @@ mod tests {
         let error = safe_save(&path, "CREATE TABLE a (id uuid);", Some(&result.hash)).unwrap_err();
         assert!(error.contains("changed outside ViewDB"));
     }
+
+    #[test]
+    fn metadata_uses_workspace_sidecar() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let sql = directory.path().join("schema.sql");
+        assert_eq!(metadata_path(&sql).unwrap(), directory.path().join("workspace.sql-erd.json"));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_example, open_document, save_document])
+        .invoke_handler(tauri::generate_handler![load_example, open_document, save_document, load_workspace_metadata, save_workspace_metadata])
         .run(tauri::generate_context!())
         .expect("error while running ViewDB");
 }

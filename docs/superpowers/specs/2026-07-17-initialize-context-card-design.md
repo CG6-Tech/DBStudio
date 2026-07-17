@@ -41,9 +41,9 @@ Create a focused `ContextProjectionBody` component and render it from `FlowBlock
 The card header uses the SQL construct as its stable title:
 
 - Title: `DECLARE`
-- Subtitle: `Initialize context`
+- Subtitle: `Initialize context · 3 variables`, with the count derived from parsed declarations and singularized for one variable.
 
-The subtitle is descriptive text and does not include the variable count or variable names.
+The subtitle does not list variable names.
 
 Each declaration is one compact row:
 

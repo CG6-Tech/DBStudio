@@ -38,6 +38,13 @@ When an individual declaration cannot be parsed confidently, retain it in `unpar
 
 Create a focused `ContextProjectionBody` component and render it from `FlowBlock` when a context projection is present.
 
+The card header uses the SQL construct as its stable title:
+
+- Title: `DECLARE`
+- Subtitle: `Initialize context`
+
+The subtitle is descriptive text and does not include the variable count or variable names.
+
 Each declaration is one compact row:
 
 - Variable name is left-aligned and truncates safely when necessary.

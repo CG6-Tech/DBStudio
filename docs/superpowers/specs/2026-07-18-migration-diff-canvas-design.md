@@ -83,6 +83,19 @@ Selection is synchronized across canvas cards, changed rows, list rows, and insp
 
 Export remains disabled until unresolved renames, required backfills, and blocking approvals are resolved.
 
+## Decision Gating
+
+Risk communicates impact; explicit requirements control export readiness. A change must never require unrelated actions merely because its risk is `blocked`.
+
+- A required added column without a default requires a backfill expression. A separate destructive approval is not required once the backfill is supplied.
+- A destructive drop requires explicit approval.
+- A rename candidate requires a Rename or Keep separate decision.
+- Review-level type, index, constraint, routine, and trigger changes remain warnings and do not create approval gates.
+
+The sidebar includes a **Required actions** checklist derived from these rules. Each row names one unresolved action, opens/selects the corresponding change or rename candidate, and switches to a completed state immediately after resolution. Export readiness is based on this checklist reaching zero.
+
+Canvas change rows and risk icons expose requirement-specific tooltips. Tooltips distinguish `Approval required`, `Backfill required`, `Rename decision required`, and informational review risk, and direct the user to the matching sidebar action.
+
 ## Performance
 
 - Diff computation stays in the existing migration worker.

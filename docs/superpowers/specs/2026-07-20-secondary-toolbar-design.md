@@ -6,14 +6,13 @@ Reduce congestion in DBStudio's main header by moving workspace commands into a 
 
 ## Layout
 
-The application uses four vertical regions:
+The application uses three top-level vertical regions:
 
 1. A 50px main header.
-2. A 36px full-width secondary toolbar.
-3. The existing sidebar and canvas workspace.
-4. The existing 30px status bar.
+2. The existing sidebar and canvas workspace.
+3. The existing 30px status bar.
 
-The secondary toolbar sits immediately below the main header and above both the sidebar and canvas. It does not float over the canvas and does not belong to either workspace column.
+Inside the workspace, the left sidebar spans the full available height. The right canvas column contains a 36px docked secondary toolbar followed by the canvas. The toolbar therefore starts exactly at the canvas edge, does not cover tables, and never extends over the sidebar.
 
 ## Main Header
 
@@ -52,13 +51,13 @@ The New control continues to load the existing starter schema in this change. Cr
 
 ## Responsive Behavior
 
-The secondary toolbar remains one row and never covers the workspace. At narrower widths, New and Open Folder labels collapse while their icons and accessible names remain. The dialect selector stays visible. The main header continues to hide the document title only when necessary after the command relocation has already freed space.
+The secondary toolbar remains one row and never covers the canvas. At narrower widths, it automatically follows the reduced sidebar width; New and Open Folder labels collapse while their icons and accessible names remain. The dialect selector stays visible. The main header continues to hide the document title only when necessary after the command relocation has already freed space.
 
 ## Components
 
 - `Toolbar` becomes the focused main header.
 - A new `WorkspaceCommandBar` owns File, History, View, and Dialect controls.
-- `App` renders both components as siblings and passes the existing callbacks without changing domain behavior.
+- `App` renders `Toolbar` above the workspace. Within the workspace grid, `WorkspaceCommandBar` occupies the top-right cell, the sidebar spans both workspace rows, and the diagram occupies the lower-right cell.
 - Shared toolbar-control styles are reused so the two bars remain visually related without duplicating behavior.
 
 ## Safety and State

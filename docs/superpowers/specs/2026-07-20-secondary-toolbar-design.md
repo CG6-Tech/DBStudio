@@ -19,39 +19,37 @@ Inside the workspace, the left sidebar spans the full available height. The righ
 The main header retains:
 
 - DBStudio logo, name, and Beta badge.
-- Current document or workspace name.
-- Unsaved-state indicator.
 - Update-check action.
 - Feedback action.
 - Primary Save action.
 
-The document name receives the flexible middle space. Save remains the strongest control. Update and Feedback remain visually secondary.
+Flexible space separates the brand from the right-side actions. Save remains the strongest control. Update and Feedback remain visually secondary.
 
 ## Secondary Toolbar
 
-Commands are arranged left to right in four groups:
+Commands and context are arranged left to right:
 
-1. **File:** New, Open Folder, Import workspace data, Export workspace data.
-2. **History:** Undo and Redo.
-3. **View:** Expand/Fit diagram and Code/SQL preview.
-4. **Context:** SQL dialect selector aligned to the far right.
+1. **Context:** SQL dialect selector, a divider, then the current document or workspace name with its unsaved-state indicator.
+2. **Flexible space:** allows the current filename to use available width and separates context from commands.
+3. **Import:** Import workspace data.
+4. **History:** Undo and Redo.
+5. **View:** Expand/Fit diagram and Code/SQL preview.
 
-Thin separators appear only between the File, History, and View groups. Flexible space before the dialect selector keeps document context separate from commands.
+Thin separators appear between Import, History, and View. New, Open Folder, and Export are not shown in this toolbar. Open Folder remains available from the existing sidebar entry point.
 
-The New control continues to load the existing starter schema in this change. Creating a truly blank schema is a separate feature because the current application requires at least one parsed table.
 
 ## Visual Treatment
 
 - Reuse the existing dark palette, Lucide icons, borders, and typography.
 - Use 30–32px controls inside the 36px toolbar.
-- Use labels for New and Open Folder; keep Import, Export, Undo, Redo, Expand, and Code icon-first with accessible labels and tooltips.
+- Keep Import, Undo, Redo, Expand, and Code icon-first with accessible labels and tooltips.
 - Give the secondary toolbar less contrast and no stronger shadow than the main header.
 - Preserve the green primary treatment only for Save.
 - Use clear hover and `focus-visible` states.
 
 ## Responsive Behavior
 
-The secondary toolbar remains one row and never covers the canvas. At narrower widths, it automatically follows the reduced sidebar width; New and Open Folder labels collapse while their icons and accessible names remain. The dialect selector stays visible. The main header continues to hide the document title only when necessary after the command relocation has already freed space.
+The secondary toolbar remains one row and never covers the canvas. At narrower widths, it automatically follows the reduced sidebar width. The dialect selector and commands stay visible while the current filename truncates with an ellipsis.
 
 ## Components
 
@@ -63,7 +61,7 @@ The secondary toolbar remains one row and never covers the canvas. At narrower w
 ## Safety and State
 
 - Disabled Undo, Redo, and Save behavior remains unchanged.
-- Existing New, Open, Import, Export, Fit, Preview, and dialect callbacks remain unchanged.
+- Existing Import, Undo, Redo, Fit, Preview, and dialect callbacks remain unchanged.
 - Update checking, feedback, dialogs, and unsaved-work handling remain unchanged.
 - No canvas, parser, persistence, or release behavior changes are included.
 

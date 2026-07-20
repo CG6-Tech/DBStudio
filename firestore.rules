@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function anonymousOwner(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.firebase.sign_in_provider == "anonymous";
+    }
+
+    function validDiagnostics(value) {
+      return value == null || (
+        value is map
+        && value.keys().hasOnly(["version", "channel", "os", "architecture", "runtime", "recentErrorCodes"])
+        && value.version is string && value.version.size() <= 40
+        && value.channel is string && value.channel.size() <= 40
+        && value.os is string && value.os.size() <= 40
+        && value.architecture is string && value.architecture.size() <= 40
+        && value.runtime in ["desktop", "browser-preview"]
+        && value.recentErrorCodes is list && value.recentErrorCodes.size() <= 20
+      );
+    }
+
+    function validFeedback(feedbackId) {
+      let data = request.resource.data;
+      let ratePath = /databases/$(database)/documents/feedbackRateLimits/$(request.auth.uid);
+      let nextRate = getAfter(ratePath).data;
+      return data.keys().hasOnly(["ownerUid", "category", "message", "contactEmail", "diagnostics", "createdAt"])
+        && data.ownerUid == request.auth.uid
+        && data.category in ["bug", "idea", "question", "other"]
+        && data.message is string && data.message.size() >= 10 && data.message.size() <= 4000
+        && (data.contactEmail == null || (data.contactEmail is string && data.contactEmail.size() <= 254))
+        && validDiagnostics(data.diagnostics)
+        && data.createdAt == request.time
+        && nextRate.ownerUid == request.auth.uid
+        && nextRate.feedbackIds.hasAny([feedbackId])
+        && (!exists(ratePath) || !get(ratePath).data.feedbackIds.hasAny([feedbackId]));
+    }
+
+    match /feedback/{feedbackId} {
+      allow create: if anonymousOwner(request.resource.data.ownerUid) && validFeedback(feedbackId);
+      allow read, update, delete: if false;
+    }
+
+    match /feedbackRateLimits/{uid} {
+      allow get: if anonymousOwner(uid);
+      allow list, delete: if false;
+      allow create: if anonymousOwner(uid)
+        && request.resource.data.keys().hasOnly(["ownerUid", "count", "windowStartedAt", "updatedAt", "feedbackIds"])
+        && request.resource.data.ownerUid == uid
+        && request.resource.data.count == 1
+        && request.resource.data.windowStartedAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.feedbackIds is list
+        && request.resource.data.feedbackIds.size() == 1;
+      allow update: if anonymousOwner(uid)
+        && request.resource.data.keys().hasOnly(["ownerUid", "count", "windowStartedAt", "updatedAt", "feedbackIds"])
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.feedbackIds is list
+        && (
+          (request.time < resource.data.windowStartedAt + duration.value(1, "h")
+            && request.resource.data.windowStartedAt == resource.data.windowStartedAt
+            && request.resource.data.count == resource.data.count + 1
+            && request.resource.data.count <= 5
+            && request.resource.data.feedbackIds.size() == resource.data.feedbackIds.size() + 1
+            && request.resource.data.feedbackIds.hasAll(resource.data.feedbackIds))
+          ||
+          (request.time >= resource.data.windowStartedAt + duration.value(1, "h")
+            && request.resource.data.windowStartedAt == request.time
+            && request.resource.data.count == 1
+            && request.resource.data.feedbackIds.size() == 1)
+        );
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}

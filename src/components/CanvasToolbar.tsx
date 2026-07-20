@@ -1,12 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Focus, Grid3X3, LayoutDashboard, Map, Maximize, Minus, Plus, Search } from "lucide-react";
+import type * as React from "react";
+import { Focus, Grid3X3, LayoutDashboard, Map, Maximize, MessageCircle, Minus, Plus, Search } from "lucide-react";
 import { searchCanvas } from "../domain/canvasSearch";
 import type { SchemaDocument } from "../domain/types";
 import { useUiStore } from "../state/uiStore";
 
+interface CanvasControlAction {
+  title: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+  pressed?: boolean;
+  disabled?: boolean;
+}
+
 function isEditable(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
   return Boolean(element?.isContentEditable || element?.closest("input, textarea, select"));
+}
+
+export function CanvasControlToolbar({ label, zoom, onZoomOut, onZoomIn, onFit, actions = [] }: { label: string; zoom: number; onZoomOut: () => void; onZoomIn: () => void; onFit: () => void; actions?: CanvasControlAction[] }) {
+  return <div className="canvas-toolbar-wrap"><div className="canvas-toolbar" aria-label={label}>
+    <button title="Zoom out (-)" onClick={onZoomOut}><Minus size={17} /></button>
+    <strong>{Math.round(zoom * 100)}%</strong>
+    <button title="Zoom in (+)" onClick={onZoomIn}><Plus size={17} /></button>
+    <span />
+    <button title="Fit workspace (0)" onClick={onFit}><Maximize size={17} /></button>
+    {actions.map((action) => <button key={action.title} title={action.title} onClick={action.onClick} aria-pressed={action.pressed} disabled={action.disabled}>{action.icon}</button>)}
+  </div></div>;
 }
 
 export function CanvasToolbar({ document }: { document: SchemaDocument }) {
@@ -18,6 +38,7 @@ export function CanvasToolbar({ document }: { document: SchemaDocument }) {
   const searchOpen = useUiStore((state) => state.searchOpen);
   const snapToGrid = useUiStore((state) => state.snapToGrid);
   const minimapVisible = useUiStore((state) => state.minimapVisible);
+  const tableCommentsVisible = useUiStore((state) => state.tableCommentsVisible);
   const setSelection = useUiStore((state) => state.setSelection);
   const setSearchOpen = useUiStore((state) => state.setSearchOpen);
   const requestFit = useUiStore((state) => state.requestFit);
@@ -27,6 +48,7 @@ export function CanvasToolbar({ document }: { document: SchemaDocument }) {
   const requestAutoLayout = useUiStore((state) => state.requestAutoLayout);
   const toggleSnapToGrid = useUiStore((state) => state.toggleSnapToGrid);
   const toggleMinimap = useUiStore((state) => state.toggleMinimap);
+  const toggleTableComments = useUiStore((state) => state.toggleTableComments);
   const results = useMemo(() => searchCanvas(document, query), [document, query]);
   const focusableSelection = selection?.kind === "table" || selection?.kind === "column";
 
@@ -86,6 +108,7 @@ export function CanvasToolbar({ document }: { document: SchemaDocument }) {
       <button title="Focus selection (F)" onClick={requestFocus} disabled={!focusableSelection}><Focus size={17} /></button>
       <button title="Auto layout" onClick={requestAutoLayout}><LayoutDashboard size={17} /></button>
       <button title="Snap to grid" onClick={toggleSnapToGrid} aria-pressed={snapToGrid}><Grid3X3 size={17} /></button>
+      <button title="Toggle table comments" onClick={toggleTableComments} aria-pressed={tableCommentsVisible} disabled={!document.tables.some((table) => table.comment?.trim())}><MessageCircle size={17} /></button>
       <button title="Toggle minimap" onClick={toggleMinimap} aria-pressed={minimapVisible}><Map size={17} /></button>
       </div>
     </div>

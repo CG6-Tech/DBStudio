@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ViewDB",
-  "version": "0.1.0",
-  "identifier": "com.viewdb.sample",
+  "productName": "DBStudio",
+  "version": "0.1.0-beta.1",
+  "identifier": "app.dbstudio.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "ViewDB",
+        "title": "DBStudio",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -22,17 +22,32 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.googleapis.com https://*.cloudfunctions.net https://*.firebaseapp.com https://*.web.app; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+      "devCsp": null
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "createUpdaterArtifacts": true,
+    "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns"
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZDMDFDNDBCNUM1Q0NDOUEKUldTYXpGeGNDOFFCL0NYYVphV2EySmdsK21FdXlTRHo3b1ZRbExLQStoeWVrM08vS2tvbzIxSmQK",
+      "endpoints": [
+        "https://us-central1-mydb-studio.cloudfunctions.net/checkUpdate?target={{target}}&arch={{arch}}&current_version={{current_version}}&channel=beta"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

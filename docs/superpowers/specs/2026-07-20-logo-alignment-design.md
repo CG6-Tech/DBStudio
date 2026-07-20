@@ -11,11 +11,11 @@ The three internal rectangles remain unchanged:
 - size: `168 × 96`;
 - corner radius: `18`;
 - stroke width: `28`;
-- positions: `(0, 0)`, `(72, 84)`, and `(0, 168)`;
+- positions: `(0, 0)`, `(80, 97)`, and `(0, 194)`;
 - rotation: `30deg`;
 - opacities: `1`, `0.8`, and `0.55`.
 
-The current rotated mark sits high and slightly left inside the 512-pixel canvas. Move the group anchor from `(256, 256)` to `(264, 275)`, an optical correction of 8 pixels right and 19 pixels down. This retains the intended stagger while bringing the visual weight closer to the center.
+Keep the supplied group transform anchored at `(256, 256)` with its `30deg` rotation and `(-120, -132)` local translation. The updated middle and lower offsets are the approved production geometry.
 
 ## Assets
 

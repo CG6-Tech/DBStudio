@@ -1,20 +1,38 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import "pixi.js/unsafe-eval";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type * as React from "react";
 import { Application, Container, FederatedPointerEvent, Graphics, Text, TextStyle } from "pixi.js";
 import RBush from "rbush";
+import { Check, Lock, Move as MoveIcon, Pencil, Trash2 } from "lucide-react";
 import {
   buildRelationshipGeometry, connectedRelationshipIds, indexRelationshipsByTable, relationshipAnimationEnabled, roundedOrthogonalPath, type AnchorSide, type Point,
 } from "../domain/relationshipGeometry";
-import { canCreateRelationship, normalizeRelationshipType, relationshipCandidates, type RelationshipCandidate } from "../domain/relationshipCreation";
+import { canCreateRelationship, normalizeRelationshipType } from "../domain/relationshipCreation";
 import { isRelationshipDeleteKey, nearestRelationship, relationshipSegments, type RelationshipSegmentItem } from "../domain/relationshipHitTesting";
 import { moveArea, pointerDelta, resizeArea } from "../domain/areaGeometry";
-import { adaptiveGrid, projectPoint, quantizeDevicePixel, snapPoint, zoomAround } from "../domain/canvasGeometry";
-import { buildCanvasIndexes } from "../domain/canvasSnapshot";
-import { MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM, scaleToFit } from "../domain/viewportGeometry";
+import { captureAreaContents } from "../domain/areaMembership";
+import { projectPoint, snapPoint } from "../domain/canvasGeometry";
+import { buildCanvasIndexes, createCanvasSnapshot, diffCanvasSnapshots } from "../domain/canvasSnapshot";
+import type { CanvasOperationChanges } from "../domain/operations";
+import { nextTableWidthScale, normalizeTableWidthScale } from "../domain/tableGeometry";
+import { scaleToFit } from "../domain/viewportGeometry";
 import { inflateRoutingObstacles, routeIntersectsObstacles, type RoutingRequest } from "../domain/orthogonalRouter";
 import type { RoutingWorkerResponse } from "../layout/relationship-routing.worker";
-import type { DiagramArea, LayoutNode, LayoutResult, Relationship, SchemaDocument } from "../domain/types";
-import { addRelationship, assignTableToArea, deleteRelationship, updateArea, updateNote, updateTable } from "../domain/schemaActions";
+import type { DiagramArea, LayoutNode, LayoutResult, Relationship, SchemaDocument, Table } from "../domain/types";
+import { addRelationship, assignNoteToArea, assignTableToArea, deleteArea, deleteNote, deleteRelationship, palette, updateArea, updateNote, updateTable } from "../domain/schemaActions";
 import { useUiStore } from "../state/uiStore";
+import {
+  createTableCard,
+  drawTableCardBackground,
+  tableCardColors,
+  tableColumnStyle,
+  tableTypeStyle,
+  type ColumnVisual,
+  type TableBackgroundVisual,
+} from "./canvas/TableCard";
+import { syncCanvasGrid, wheelViewport, zoomViewportAtCenter } from "./canvas/canvasViewport";
+import { CANVAS_RENDERER_PREFERENCE } from "./canvas/rendererPreference";
+import { sceneLayoutKey, shouldFitLayoutGeneration } from "./canvas/sceneLayoutKey";
 
 interface SpatialItem {
   minX: number;
@@ -28,27 +46,23 @@ interface DiagramCanvasProps {
   document: SchemaDocument;
   layout: LayoutResult;
   onReplace: (label: string, next: SchemaDocument) => void;
-}
-
-interface RelationshipChoice {
-  candidates: RelationshipCandidate[];
-  x: number;
-  y: number;
+  highlightedTableIds?: ReadonlySet<string>;
+  sceneRevision?: number;
+  topologyRevision?: number;
+  changes?: CanvasOperationChanges & { revision: number };
 }
 
 interface CreationPort extends SpatialItem {
   container: Container;
   tableId: string;
-  columnId?: string;
-  kind: "table" | "field";
+  columnId: string;
   point: Point;
 }
 
 type RelationshipDrag = {
-  kind: "table" | "field";
   pointerId: number;
   sourceTableId: string;
-  sourceColumnId?: string;
+  sourceColumnId: string;
   sourcePoint: Point;
 };
 
@@ -64,7 +78,7 @@ interface AreaRender {
 }
 
 interface CanvasGeometryController {
-  reconcile: (document: SchemaDocument, nodes: LayoutNode[]) => void;
+  reconcile: (document: SchemaDocument, nodes: LayoutNode[], changes?: CanvasOperationChanges & { revision: number }) => void;
 }
 
 type CanvasInteraction = {
@@ -83,6 +97,7 @@ type CanvasInteraction = {
   startPointer: Point;
   startArea: Point;
   tableStarts: Map<string, Point>;
+  noteStarts: Map<string, Point>;
   moved: boolean;
 } | {
   kind: "area-resize";
@@ -91,6 +106,30 @@ type CanvasInteraction = {
   startPointer: Point;
   startSize: { width: number; height: number };
   moved: boolean;
+} | {
+  kind: "note-move";
+  pointerId: number;
+  noteId: string;
+  container: Container;
+  startPointer: Point;
+  startPosition: Point;
+  moved: boolean;
+} | {
+  kind: "table-comment-move";
+  pointerId: number;
+  tableId: string;
+  container: Container;
+  startPointer: Point;
+  startPosition: Point;
+  moved: boolean;
+};
+
+type CanvasObjectMenu = {
+  kind: "area" | "note" | "table-comment";
+  id: string;
+  x: number;
+  y: number;
+  confirmingDelete?: boolean;
 };
 
 const colors = {
@@ -107,17 +146,31 @@ const colors = {
   edge: 0x63736d,
 };
 
-const titleStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 16, fontWeight: "600", fill: colors.text });
-const columnStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, fill: colors.text });
-const typeStyle = new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, fill: colors.type });
-const badgeStyle = new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 9, fontWeight: "700", fill: colors.key });
-const cardCornerRadius = 5;
-const cardAccentHeight = 10;
 const areaResizeTargetSize = 28;
 const areaLabelOffset = { x: 12, y: -15 };
+const tableCommentSize = { width: 220, height: 110, gap: 18 };
+
+function pixelPoint(point: Point): Point {
+  return { x: Math.round(point.x), y: Math.round(point.y) };
+}
 
 function colorNumber(value: string): number {
   return Number.parseInt(value.replace("#", ""), 16);
+}
+
+function createCanvasNoteAnnotation(text: string, color: number, label: string): Container {
+  const container = new Container();
+  container.eventMode = "none";
+  container.addChild(new Graphics().roundRect(0, 0, tableCommentSize.width, tableCommentSize.height, 8).fill({ color: colors.card, alpha: 0.98 }).stroke({ color, alpha: 0.72, width: 1.5 }));
+  container.addChild(new Graphics().moveTo(0, 30).lineTo(tableCommentSize.width, 30).stroke({ color, alpha: 0.22, width: 1 }));
+  const title = new Text({ text: label, style: new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 9, fontWeight: "600", fill: color, letterSpacing: 0 }) });
+  title.position.set(12, 10);
+  container.addChild(title);
+  const visibleText = text.length > 260 ? `${text.slice(0, 257)}...` : text;
+  const body = new Text({ text: visibleText, style: new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 12, lineHeight: 17, fill: colors.text, wordWrap: true, wordWrapWidth: tableCommentSize.width - 24 }) });
+  body.position.set(12, 40);
+  container.addChild(body);
+  return container;
 }
 
 function editableTarget(target: EventTarget | null): boolean {
@@ -132,19 +185,6 @@ function drawSolidRoute(graphics: Graphics, points: Point[], color: number, widt
   graphics.stroke({ color, width });
 }
 
-function drawTopAccent(graphics: Graphics, width: number, color: number): void {
-  graphics
-    .beginPath()
-    .moveTo(0, cardAccentHeight)
-    .lineTo(0, cardCornerRadius)
-    .quadraticCurveTo(0, 0, cardCornerRadius, 0)
-    .lineTo(width - cardCornerRadius, 0)
-    .quadraticCurveTo(width, 0, width, cardCornerRadius)
-    .lineTo(width, cardAccentHeight)
-    .closePath()
-    .fill(color);
-}
-
 function drawAreaFrame(graphics: Graphics, width: number, height: number, color: number): void {
   graphics.clear()
     .roundRect(0, 0, width, height, 10)
@@ -156,7 +196,8 @@ function createAreaLabel(area: DiagramArea, color: number): Container {
   const label = new Container();
   const name = new Text({ text: area.name, style: new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 12, fontWeight: "600", fill: colors.text }) });
   const tableCount = area.tableIds.length;
-  const count = new Text({ text: `${tableCount} table${tableCount === 1 ? "" : "s"}`, style: new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 9, fontWeight: "500", fill: colors.muted }) });
+  const noteCount = area.noteIds?.length ?? 0;
+  const count = new Text({ text: `${tableCount} table${tableCount === 1 ? "" : "s"} · ${noteCount} note${noteCount === 1 ? "" : "s"}`, style: new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 9, fontWeight: "500", fill: colors.muted }) });
   const width = Math.max(132, 54 + name.width + count.width);
   const background = new Graphics().roundRect(0, 0, width, 30, 7).fill({ color: 0x111b26, alpha: 0.98 }).stroke({ color, alpha: 0.85, width: 1 });
   const grip = new Graphics();
@@ -241,24 +282,15 @@ function styleCardinalityBadge(badge: Container, label: "1" | "N", active: boole
   badge.addChild(text);
 }
 
-function drawCardBackground(graphics: Graphics, width: number, height: number, accent: number, selected: boolean): void {
-  graphics.clear().roundRect(0, 0, width, height, cardCornerRadius).fill(colors.card);
-  graphics.roundRect(0, 0, width, 50, cardCornerRadius).fill(colors.cardTop);
-  drawTopAccent(graphics, width, accent);
-  graphics.rect(0, 40, width, 10).fill(colors.cardTop);
-  graphics.moveTo(0, 50).lineTo(width, 50).stroke({ color: colors.border, width: 1 });
-  graphics.roundRect(0, 0, width, height, cardCornerRadius).stroke({ color: selected ? accent : colors.border, width: selected ? 2 : 1 });
-}
-
-export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProps) {
+export function DiagramCanvas({ document, layout, onReplace, highlightedTableIds = new Set(), sceneRevision = 0, topologyRevision = 0, changes }: DiagramCanvasProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
   const worldRef = useRef<Container | null>(null);
   const tickerCleanupRef = useRef<() => void>(() => undefined);
   const [rendererReady, setRendererReady] = useState(false);
   const [viewportVersion, setViewportVersion] = useState(0);
-  const [relationshipChoice, setRelationshipChoice] = useState<RelationshipChoice | null>(null);
-  const [relationshipChoiceIndex, setRelationshipChoiceIndex] = useState(0);
+  const [rendererError, setRendererError] = useState<string | null>(null);
+  const [objectMenu, setObjectMenu] = useState<CanvasObjectMenu | null>(null);
   const viewportRef = useRef({ x: 80, y: 80, scale: 1 });
   const syncViewportRef = useRef<() => void>(() => undefined);
   const focusSelectionRef = useRef<() => void>(() => undefined);
@@ -273,13 +305,21 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
   const documentRef = useRef(document);
   const onReplaceRef = useRef(onReplace);
   const selectedRelationshipIdRef = useRef<string | null>(null);
+  const highlightedTableIdsRef = useRef(highlightedTableIds);
   const workspaceBoundsRef = useRef({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
   const gridLevelRef = useRef(1);
   const routingGenerationRef = useRef(0);
+  const routingWorkerRef = useRef<Worker | null>(null);
+  const routingResponseRef = useRef<(event: MessageEvent<RoutingWorkerResponse>) => void>(() => undefined);
   const routingCacheRef = useRef(new Map<string, Point[]>());
   const previousRoutingNodesRef = useRef(new Map<string, LayoutNode>());
+  const knownAreaIdsRef = useRef(new Set(document.areas.map((area) => area.id)));
+  const areaMoveContentsRef = useRef(new Map(document.areas.map((area) => [area.id, area.moveContents])));
   const selection = useUiStore((state) => state.selection);
   const setSelection = useUiStore((state) => state.setSelection);
+  const focusTableEditor = useUiStore((state) => state.focusTableEditor);
+  const setActivePanel = useUiStore((state) => state.setActivePanel);
+  const setVisualsTab = useUiStore((state) => state.setVisualsTab);
   const setZoom = useUiStore((state) => state.setZoom);
   const fitRequest = useUiStore((state) => state.fitRequest);
   const zoomInRequest = useUiStore((state) => state.zoomInRequest);
@@ -288,35 +328,80 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
   const snapToGrid = useUiStore((state) => state.snapToGrid);
   const snapToGridRef = useRef(snapToGrid);
   const minimapVisible = useUiStore((state) => state.minimapVisible);
+  const tableCommentsVisible = useUiStore((state) => state.tableCommentsVisible);
   const lastZoomInRequest = useRef(zoomInRequest);
   const lastZoomOutRequest = useRef(zoomOutRequest);
   const lastFocusRequest = useRef(focusRequest);
+  const lastFitRequest = useRef(fitRequest);
+  const lastFittedLayoutGenerationRef = useRef<number | null>(null);
   snapToGridRef.current = snapToGrid;
   const activeSelectionTableId = selection?.kind === "table" || selection?.kind === "column" ? selection.tableId : null;
   const selectedColumnId = selection?.kind === "column" ? selection.columnId : null;
   const selectedRelationshipId = selection?.kind === "relationship" ? selection.relationshipId : null;
-  selectedRelationshipIdRef.current = selectedRelationshipId;
+  const hoveredRelationshipId = useUiStore((state) => state.hoveredRelationshipId);
+  const visualRelationshipId = selectedRelationshipId ?? hoveredRelationshipId;
+  selectedRelationshipIdRef.current = visualRelationshipId;
+  highlightedTableIdsRef.current = highlightedTableIds;
   documentRef.current = document;
   onReplaceRef.current = onReplace;
 
-  const canvasIndexes = useMemo(() => buildCanvasIndexes(document), [document.tables, document.relationships]);
+  const canvasIndexes = useMemo(() => buildCanvasIndexes(document), [topologyRevision]);
+  const liveTableById = useMemo(() => new Map(document.tables.map((table) => [table.id, table])), [document.tables]);
   const effectiveNodes = useMemo(() => layout.nodes.map((node) => {
-    const table = canvasIndexes.tableById.get(node.id);
+    const table = liveTableById.get(node.id);
     return table && (table.position.x !== 0 || table.position.y !== 0) ? { ...node, ...table.position } : node;
-  }), [canvasIndexes.tableById, layout.nodes]);
+  }), [layout.nodes, liveTableById]);
+  const effectiveSceneLayoutKey = useMemo(() => sceneLayoutKey(effectiveNodes), [effectiveNodes]);
+  const tableCommentAnnotations = useMemo(() => {
+    if (!tableCommentsVisible) return [];
+    const nodeById = new Map(effectiveNodes.map((node) => [node.id, node]));
+    return document.tables.flatMap((table) => {
+      const text = table.comment?.trim();
+      const node = nodeById.get(table.id);
+      if (!text || !node || table.commentVisible === false) return [];
+      const offset = table.commentOffset ?? { x: node.width + tableCommentSize.gap, y: 0 };
+      return [{ tableId: table.id, text, color: table.commentColor ?? table.color, label: `TABLE · ${table.schema ? `${table.schema}.` : ""}${table.name}`, x: node.x + offset.x, y: node.y + offset.y }];
+    });
+  }, [document.tables, effectiveNodes, tableCommentsVisible]);
+  const captureAreaWithCurrentBounds = (source: SchemaDocument, areaId: string) => {
+    const tableBounds = effectiveNodes.map((node) => ({ id: node.id, x: node.x, y: node.y, width: node.width, height: node.height }));
+    const noteBounds = source.notes.map((note) => ({ id: note.id, x: note.x, y: note.y, width: 220, height: 110 }));
+    return captureAreaContents(source, areaId, tableBounds, noteBounds);
+  };
+  useEffect(() => {
+    const currentIds = new Set(document.areas.map((area) => area.id));
+    const addedAreaIds = document.areas.filter((area) => !knownAreaIdsRef.current.has(area.id)).map((area) => area.id);
+    knownAreaIdsRef.current = currentIds;
+    if (addedAreaIds.length === 0) return;
+    let next = document;
+    addedAreaIds.forEach((areaId) => { next = captureAreaWithCurrentBounds(next, areaId); });
+    if (next !== document) onReplaceRef.current("Capture area contents", next);
+  }, [document, effectiveNodes]);
+  useEffect(() => {
+    const previous = areaMoveContentsRef.current;
+    const enabledAreaIds = document.areas.filter((area) => area.moveContents && previous.get(area.id) === false).map((area) => area.id);
+    areaMoveContentsRef.current = new Map(document.areas.map((area) => [area.id, area.moveContents]));
+    if (enabledAreaIds.length === 0) return;
+    let next = document;
+    enabledAreaIds.forEach((areaId) => { next = captureAreaWithCurrentBounds(next, areaId); });
+    if (next !== document) onReplaceRef.current("Capture area contents", next);
+  }, [document, effectiveNodes]);
   const sceneStructureKey = useMemo(() => JSON.stringify([
-    document.tables.map((table) => [table.id, table.name, table.color, table.columns.map((column) => [column.id, column.name, column.dataType, column.nullable, column.primaryKey])]),
+    document.tables.map((table) => [table.id, table.columns.map((column) => column.id)]),
+    document.tables.filter((table) => table.comment?.trim()).map((table) => [table.id, table.comment, table.commentVisible, table.commentOffset, table.commentColor ?? table.color]),
     document.relationships.map((relationship) => [relationship.id, relationship.sourceTableId, relationship.sourceColumnId, relationship.targetTableId, relationship.targetColumnId]),
-    document.areas.map((area) => [area.id, area.name, area.color, area.locked, area.moveContents, area.tableIds]),
+    document.areas.map((area) => [area.id, area.name, area.color, area.locked, area.moveContents, area.tableIds, area.noteIds ?? []]),
     document.notes.map((note) => [note.id, note.text, note.color]),
-  ]), [document.tables, document.relationships, document.areas, document.notes]);
+    [...highlightedTableIds].sort(),
+    tableCommentsVisible,
+  ]), [sceneRevision, highlightedTableIds, tableCommentsVisible]);
   const workspaceBounds = useMemo(() => {
-    const left = [...effectiveNodes.map((node) => node.x), ...document.areas.map((area) => area.x), ...document.notes.map((note) => note.x)];
-    const top = [...effectiveNodes.map((node) => node.y), ...document.areas.map((area) => area.y), ...document.notes.map((note) => note.y)];
-    const right = [...effectiveNodes.map((node) => node.x + node.width), ...document.areas.map((area) => area.x + area.width), ...document.notes.map((note) => note.x + 220)];
-    const bottom = [...effectiveNodes.map((node) => node.y + node.height), ...document.areas.map((area) => area.y + area.height), ...document.notes.map((note) => note.y + 110)];
+    const left = [...effectiveNodes.map((node) => node.x), ...document.areas.map((area) => area.x), ...document.notes.map((note) => note.x), ...tableCommentAnnotations.map((note) => note.x)];
+    const top = [...effectiveNodes.map((node) => node.y), ...document.areas.map((area) => area.y), ...document.notes.map((note) => note.y), ...tableCommentAnnotations.map((note) => note.y)];
+    const right = [...effectiveNodes.map((node) => node.x + node.width), ...document.areas.map((area) => area.x + area.width), ...document.notes.map((note) => note.x + 220), ...tableCommentAnnotations.map((note) => note.x + tableCommentSize.width)];
+    const bottom = [...effectiveNodes.map((node) => node.y + node.height), ...document.areas.map((area) => area.y + area.height), ...document.notes.map((note) => note.y + 110), ...tableCommentAnnotations.map((note) => note.y + tableCommentSize.height)];
     return { minX: Math.min(0, ...left), minY: Math.min(0, ...top), maxX: Math.max(1, ...right), maxY: Math.max(1, ...bottom) };
-  }, [document.areas, document.notes, effectiveNodes]);
+  }, [document.areas, document.notes, effectiveNodes, tableCommentAnnotations]);
   workspaceBoundsRef.current = workspaceBounds;
 
   useEffect(() => {
@@ -324,14 +409,23 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     let cancelled = false;
     let initialized = false;
     let viewportRefreshTimer: number | undefined;
+    let rendererTimeout: number | undefined;
+    let initialSceneFrame: number | undefined;
+    let initialFitTimer: number | undefined;
     const app = new Application();
-    void app.init({ backgroundAlpha: 0, antialias: true, resizeTo: hostRef.current, resolution: window.devicePixelRatio || 1, autoDensity: true }).then(() => {
+    setRendererError(null);
+    rendererTimeout = window.setTimeout(() => {
+      if (!cancelled && !initialized) setRendererError("The canvas renderer did not start. Try reopening DBStudio or updating your graphics driver.");
+    }, 8000);
+    void app.init({ preference: CANVAS_RENDERER_PREFERENCE, backgroundAlpha: 0, antialias: true, resizeTo: hostRef.current, resolution: window.devicePixelRatio || 1, autoDensity: true }).then(() => {
+      window.clearTimeout(rendererTimeout);
       initialized = true;
       if (cancelled || !hostRef.current) {
         app.destroy(true);
         return;
       }
       hostRef.current.appendChild(app.canvas);
+      app.canvas.oncontextmenu = (event) => event.preventDefault();
       const world = new Container();
       world.position.set(viewportRef.current.x, viewportRef.current.y);
       app.stage.addChild(world);
@@ -343,18 +437,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
         const viewport = viewportRef.current;
         world.scale.set(viewport.scale);
         world.position.set(viewport.x, viewport.y);
-        const devicePixelRatio = window.devicePixelRatio || 1;
-        const grid = adaptiveGrid(viewport.scale, gridLevelRef.current, devicePixelRatio);
-        gridLevelRef.current = grid.level;
-        const host = hostRef.current;
-        if (host) {
-          const gridX = quantizeDevicePixel(((viewport.x % grid.spacing) + grid.spacing) % grid.spacing, devicePixelRatio);
-          const gridY = quantizeDevicePixel(((viewport.y % grid.spacing) + grid.spacing) % grid.spacing, devicePixelRatio);
-          host.style.setProperty("--grid-spacing", `${grid.spacing}px`);
-          host.style.setProperty("--grid-radius", `${grid.radius}px`);
-          host.style.setProperty("--grid-x", `${gridX}px`);
-          host.style.setProperty("--grid-y", `${gridY}px`);
-        }
+        gridLevelRef.current = syncCanvasGrid(hostRef.current, viewport, gridLevelRef.current);
         const minimapViewport = minimapViewportRef.current;
         if (minimapViewport) {
           const bounds = workspaceBoundsRef.current;
@@ -377,6 +460,13 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       };
       syncViewport();
       setRendererReady(true);
+      initialSceneFrame = window.requestAnimationFrame(() => {
+        if (cancelled) return;
+        setViewportVersion((version) => version + 1);
+        initialFitTimer = window.setTimeout(() => {
+          if (!cancelled) useUiStore.getState().requestFit();
+        }, 0);
+      });
 
       let panning = false;
       let last = { x: 0, y: 0 };
@@ -386,7 +476,9 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       };
       app.stage.on("pointerdown", (event: FederatedPointerEvent) => {
         if (event.target !== app.stage) return;
+        if (event.button !== 0) return;
         if (relationshipHitTestRef.current({ x: event.global.x, y: event.global.y })) return;
+        setObjectMenu(null);
         panning = true;
         last = { x: event.global.x, y: event.global.y };
         setSelection(null);
@@ -407,17 +499,19 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       app.stage.on("pointerupoutside", stopPan);
       app.canvas.addEventListener("wheel", (event) => {
         event.preventDefault();
-        const viewport = viewportRef.current;
-        const bounds = app.canvas.getBoundingClientRect();
-        const pointer = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
-        const nextScale = Math.min(MAX_CANVAS_ZOOM, Math.max(MIN_CANVAS_ZOOM, viewport.scale * Math.exp(-event.deltaY * 0.0012)));
-        viewportRef.current = zoomAround(viewport, pointer, nextScale);
+        viewportRef.current = wheelViewport(viewportRef.current, event, app.canvas.getBoundingClientRect());
         syncViewport();
         refreshVisibleObjects();
       }, { passive: false });
+    }).catch((error: unknown) => {
+      window.clearTimeout(rendererTimeout);
+      if (!cancelled) setRendererError(`The canvas renderer could not start: ${error instanceof Error ? error.message : String(error)}`);
     });
     return () => {
       cancelled = true;
+      if (initialSceneFrame !== undefined) window.cancelAnimationFrame(initialSceneFrame);
+      window.clearTimeout(initialFitTimer);
+      window.clearTimeout(rendererTimeout);
       window.clearTimeout(viewportRefreshTimer);
       tickerCleanupRef.current();
       tickerCleanupRef.current = () => undefined;
@@ -431,6 +525,23 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
   }, [setSelection, setZoom]);
 
   useEffect(() => {
+    try {
+      const worker = new Worker(new URL("../layout/relationship-routing.worker.ts", import.meta.url), { type: "module" });
+      worker.onmessage = (event: MessageEvent<RoutingWorkerResponse>) => routingResponseRef.current(event);
+      routingWorkerRef.current = worker;
+      return () => {
+        routingGenerationRef.current += 1;
+        routingResponseRef.current = () => undefined;
+        routingWorkerRef.current = null;
+        worker.terminate();
+      };
+    } catch {
+      routingWorkerRef.current = null;
+      return undefined;
+    }
+  }, []);
+
+  useLayoutEffect(() => {
     const app = appRef.current;
     const world = worldRef.current;
     if (!app || !world) return;
@@ -465,7 +576,21 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     focusSelectionRef.current = () => {
       const currentSelection = useUiStore.getState().selection;
       const selectedTableId = currentSelection?.kind === "table" || currentSelection?.kind === "column" ? currentSelection.tableId : null;
-      const selectedNode = selectedTableId ? nodeById.get(selectedTableId) : undefined;
+      let selectedNode = selectedTableId ? nodeById.get(selectedTableId) : undefined;
+      if (!selectedNode && currentSelection?.kind === "relationship") {
+        const relationship = documentRef.current.relationships.find((item) => item.id === currentSelection.relationshipId);
+        const source = relationship && nodeById.get(relationship.sourceTableId);
+        const target = relationship && nodeById.get(relationship.targetTableId);
+        if (source && target) {
+          selectedNode = {
+            id: relationship!.id,
+            x: Math.min(source.x, target.x),
+            y: Math.min(source.y, target.y),
+            width: Math.max(source.x + source.width, target.x + target.width) - Math.min(source.x, target.x),
+            height: Math.max(source.y + source.height, target.y + target.height) - Math.min(source.y, target.y),
+          };
+        }
+      }
       if (!selectedNode) return;
       const viewport = viewportRef.current;
       const readableScale = Math.max(viewport.scale, Math.min(1.15, 620 / Math.max(selectedNode.width, selectedNode.height)));
@@ -477,9 +602,12 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     };
     const relationshipIdsByTable = indexRelationshipsByTable(document.relationships);
     const tableCardsById = new Map<string, Container>();
-    const tableBackgroundsById = new Map<string, { graphics: Graphics; node: LayoutNode; accent: number }>();
-    const columnVisualsById = new Map<string, { tableId: string; activeBackground: Graphics; name: Text; type: Text; leftPort: Graphics; rightPort: Graphics }>();
+    const tableBackgroundsById = new Map<string, TableBackgroundVisual>();
+    const columnVisualsById = new Map<string, ColumnVisual>();
+    const columnIdsByTable = new Map<string, string[]>();
+    const noteLayer = new Container();
     const noteContainersById = new Map<string, Container>();
+    const tableCommentContainersByTableId = new Map<string, Container>();
     const columnSelectionGraphics = new Map<string, Graphics>();
     const areaRenders = new Map<string, AreaRender>();
     let activeInteraction: CanvasInteraction | null = null;
@@ -525,8 +653,10 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       const shape = new Graphics();
       frame.addChild(shape);
       const label = createAreaLabel(area, color);
-      label.eventMode = area.locked ? "none" : "static";
+      label.eventMode = "static";
       label.cursor = area.locked ? "default" : "move";
+      shape.eventMode = "static";
+      shape.cursor = area.locked ? "default" : "move";
       const resizeTarget = createAreaResizeTarget(color);
       resizeTarget.eventMode = area.locked ? "none" : "static";
       resizeTarget.cursor = area.locked ? "default" : "nwse-resize";
@@ -534,13 +664,21 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       drawAreaFrame(shape, area.width, area.height, color);
       positionAreaRender(render, area.x, area.y);
 
-      label.on("pointerdown", (event: FederatedPointerEvent) => {
+      const beginAreaInteraction = (event: FederatedPointerEvent) => {
         event.stopPropagation();
+        if (event.button !== 0) return;
+        setObjectMenu(null);
+        if (area.locked) return;
         const tableStarts = new Map<string, Point>();
+        const noteStarts = new Map<string, Point>();
         if (area.moveContents) {
           area.tableIds.forEach((tableId) => {
             const node = nodeById.get(tableId);
             if (node) tableStarts.set(tableId, { x: node.x, y: node.y });
+          });
+          (area.noteIds ?? []).forEach((noteId) => {
+            const note = noteContainersById.get(noteId);
+            if (note) noteStarts.set(noteId, { x: note.x, y: note.y });
           });
         }
         activeInteraction = {
@@ -550,12 +688,22 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
           startPointer: { x: event.global.x, y: event.global.y },
           startArea: { x: frame.x, y: frame.y },
           tableStarts,
+          noteStarts,
           moved: false,
         };
-      });
+      };
+      label.on("pointerdown", beginAreaInteraction);
+      shape.on("pointerdown", beginAreaInteraction);
+      const openAreaMenu = (event: FederatedPointerEvent) => {
+        event.stopPropagation();
+        setObjectMenu({ kind: "area", id: area.id, x: event.global.x, y: event.global.y });
+      };
+      label.on("rightclick", openAreaMenu);
+      shape.on("rightclick", openAreaMenu);
 
       resizeTarget.on("pointerdown", (event: FederatedPointerEvent) => {
         event.stopPropagation();
+        if (event.button !== 0) return;
         activeInteraction = {
           kind: "area-resize",
           pointerId: event.pointerId,
@@ -571,39 +719,41 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     });
 
     document.notes.forEach((note) => {
-      const noteContainer = new Container();
+      const noteContainer = createCanvasNoteAnnotation(note.text, colorNumber(note.color), "NOTE");
       noteContainer.position.set(note.x, note.y);
       noteContainer.eventMode = "static";
       noteContainer.cursor = "move";
-      const fill = colorNumber(note.color);
-      noteContainer.addChild(new Graphics().roundRect(0, 0, 220, 110, 10).fill({ color: fill, alpha: 0.2 }).stroke({ color: fill, alpha: 0.9, width: 2 }));
-      const text = new Text({ text: note.text, style: new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, lineHeight: 19, fill: colors.text, wordWrap: true, wordWrapWidth: 188 }) });
-      text.position.set(16, 15);
-      noteContainer.addChild(text);
-      let dragging = false;
-      let start = { x: 0, y: 0, noteX: note.x, noteY: note.y };
       noteContainer.on("pointerdown", (event: FederatedPointerEvent) => {
         event.stopPropagation();
-        dragging = true;
-        start = { x: event.global.x, y: event.global.y, noteX: noteContainer.x, noteY: noteContainer.y };
+        if (event.button !== 0) return;
+        setObjectMenu(null);
+        activeInteraction = { kind: "note-move", pointerId: event.pointerId, noteId: note.id, container: noteContainer, startPointer: { x: event.global.x, y: event.global.y }, startPosition: { x: noteContainer.x, y: noteContainer.y }, moved: false };
       });
-      noteContainer.on("pointermove", (event: FederatedPointerEvent) => {
-        if (!dragging) return;
-        const scale = viewportRef.current.scale;
-        const position = { x: start.noteX + (event.global.x - start.x) / scale, y: start.noteY + (event.global.y - start.y) / scale };
-        const next = snapToGridRef.current ? snapPoint(position) : position;
-        noteContainer.position.set(next.x, next.y);
+      noteContainer.on("rightclick", (event: FederatedPointerEvent) => {
+        event.stopPropagation();
+        setObjectMenu({ kind: "note", id: note.id, x: event.global.x, y: event.global.y });
       });
-      const finishNoteDrag = () => {
-        if (!dragging) return;
-        dragging = false;
-        const currentDocument = documentRef.current;
-        onReplaceRef.current("Move note", updateNote(currentDocument, note.id, { x: noteContainer.x, y: noteContainer.y }));
-      };
-      noteContainer.on("pointerup", finishNoteDrag);
-      noteContainer.on("pointerupoutside", finishNoteDrag);
       noteContainersById.set(note.id, noteContainer);
-      world.addChild(noteContainer);
+      noteLayer.addChild(noteContainer);
+    });
+
+    tableCommentAnnotations.forEach((note) => {
+      const noteContainer = createCanvasNoteAnnotation(note.text, colorNumber(note.color), note.label);
+      noteContainer.position.set(note.x, note.y);
+      noteContainer.eventMode = "static";
+      noteContainer.cursor = "move";
+      noteContainer.on("pointerdown", (event: FederatedPointerEvent) => {
+        event.stopPropagation();
+        if (event.button !== 0) return;
+        setObjectMenu(null);
+        activeInteraction = { kind: "table-comment-move", pointerId: event.pointerId, tableId: note.tableId, container: noteContainer, startPointer: { x: event.global.x, y: event.global.y }, startPosition: { x: noteContainer.x, y: noteContainer.y }, moved: false };
+      });
+      noteContainer.on("rightclick", (event: FederatedPointerEvent) => {
+        event.stopPropagation();
+        setObjectMenu({ kind: "table-comment", id: note.tableId, x: event.global.x, y: event.global.y });
+      });
+      tableCommentContainersByTableId.set(note.tableId, noteContainer);
+      noteLayer.addChild(noteContainer);
     });
 
     const activeTableId = activeSelectionTableId;
@@ -711,30 +861,22 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       setSelection({ kind: "relationship", relationshipId });
       return true;
     };
-    let routingWorker: Worker | null = null;
     const startRoutingWorker = (requests: RoutingRequest[]) => {
       routingGenerationRef.current += 1;
-      routingWorker?.terminate();
-      routingWorker = null;
       if (requests.length === 0) return;
       const routingGeneration = routingGenerationRef.current;
-      try {
-        routingWorker = new Worker(new URL("../layout/relationship-routing.worker.ts", import.meta.url), { type: "module" });
-        routingWorker.onmessage = (event: MessageEvent<RoutingWorkerResponse>) => {
-          if (event.data.generation !== routingGenerationRef.current) return;
-          event.data.routes.forEach((route) => {
-            const render = edgeRenders.get(route.id);
-            if (!render) return;
-            routingCacheRef.current.set(route.id, route.points);
-            render.points = roundedOrthogonalPath(route.points);
-            reindexRelationship(route.id, render.points);
-            redrawRelationship(route.id);
-          });
-        };
-        routingWorker.postMessage({ generation: routingGeneration, obstacles: inflateRoutingObstacles([...nodeById.values()]), relationships: requests });
-      } catch {
-        routingWorker = null;
-      }
+      routingResponseRef.current = (event) => {
+        if (event.data.generation !== routingGenerationRef.current) return;
+        event.data.routes.forEach((route) => {
+          const render = edgeRenders.get(route.id);
+          if (!render) return;
+          routingCacheRef.current.set(route.id, route.points);
+          render.points = roundedOrthogonalPath(route.points);
+          reindexRelationship(route.id, render.points);
+          redrawRelationship(route.id);
+        });
+      };
+      routingWorkerRef.current?.postMessage({ generation: routingGeneration, obstacles: inflateRoutingObstacles([...nodeById.values()]), relationships: requests });
     };
     startRoutingWorker(routingRequests);
 
@@ -753,7 +895,6 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     app.ticker.add(updateRelationships);
     tickerCleanupRef.current = () => app.ticker.remove(updateRelationships);
 
-    const creationPorts: CreationPort[] = [];
     const creationPortIndex = new RBush<CreationPort>();
     const portsByTable = new Map<string, CreationPort[]>();
     const fieldPortsByType = new Map<string, CreationPort[]>();
@@ -777,20 +918,12 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       x: (event.global.x - viewportRef.current.x) / viewportRef.current.scale,
       y: (event.global.y - viewportRef.current.y) / viewportRef.current.scale,
     });
-    const tableAtPoint = (point: Point) => {
-      const candidates = index.search({ minX: point.x, minY: point.y, maxX: point.x, maxY: point.y });
-      for (let candidateIndex = candidates.length - 1; candidateIndex >= 0; candidateIndex -= 1) {
-        const table = canvasIndexes.tableById.get(candidates[candidateIndex].id);
-        if (table) return table;
-      }
-      return undefined;
-    };
     const fieldPortAtPoint = (point: Point) => {
       const radius = 18 / viewportRef.current.scale;
       let nearest: CreationPort | undefined;
       let nearestDistance = Number.POSITIVE_INFINITY;
       creationPortIndex.search({ minX: point.x - radius, minY: point.y - radius, maxX: point.x + radius, maxY: point.y + radius }).forEach((port) => {
-        if (port.kind !== "field" || !port.container.visible) return;
+        if (!port.container.visible) return;
         const distance = Math.hypot(point.x - port.point.x, point.y - port.point.y);
         if (distance <= radius && distance < nearestDistance) { nearest = port; nearestDistance = distance; }
       });
@@ -807,149 +940,122 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     };
     const beginRelationshipDrag = (event: FederatedPointerEvent, port: CreationPort) => {
       event.stopPropagation();
-      setRelationshipChoice(null);
-      relationshipDrag = { kind: port.kind, pointerId: event.pointerId, sourceTableId: port.tableId, sourceColumnId: port.columnId, sourcePoint: port.point };
+      relationshipDrag = { pointerId: event.pointerId, sourceTableId: port.tableId, sourceColumnId: port.columnId, sourcePoint: port.point };
       resetCreationPorts();
       setCreationPortVisible(port, true);
-      if (port.kind === "field" && port.columnId) {
-        const sourceColumn = canvasIndexes.columnById.get(port.columnId);
-        const compatiblePorts = sourceColumn ? fieldPortsByType.get(normalizeRelationshipType(sourceColumn.dataType)) ?? [] : [];
-        compatiblePorts.forEach((candidate) => {
-          setCreationPortVisible(candidate, true);
-          candidate.container.alpha = canCreateRelationship(documentRef.current, port.tableId, port.columnId!, candidate.tableId, candidate.columnId!) ? 1 : 0.16;
-        });
-      } else {
-        creationPorts.filter((candidate) => candidate.kind === "table").forEach((candidate) => {
-          setCreationPortVisible(candidate, true);
-          candidate.container.alpha = candidate.tableId === port.tableId ? 0.16 : 1;
-        });
-      }
+      const sourceColumn = canvasIndexes.columnById.get(port.columnId);
+      const compatiblePorts = sourceColumn ? fieldPortsByType.get(normalizeRelationshipType(sourceColumn.dataType)) ?? [] : [];
+      compatiblePorts.forEach((candidate) => {
+        setCreationPortVisible(candidate, true);
+        candidate.container.alpha = canCreateRelationship(documentRef.current, port.tableId, port.columnId, candidate.tableId, candidate.columnId) ? 1 : 0.16;
+      });
       drawRelationshipPreview(port.point);
     };
-    const createPort = (card: Container, tableId: string, columnId: string | undefined, kind: "table" | "field", x: number, y: number): CreationPort => {
+    const createPort = (card: Container, tableId: string, columnId: string, x: number, y: number): CreationPort => {
       const container = new Container();
       container.position.set(x, y);
       container.visible = false;
       container.eventMode = "static";
       container.cursor = "crosshair";
       container.hitArea = { contains: (px: number, py: number) => Math.hypot(px, py) <= 13 };
-      container.addChild(new Graphics().circle(0, 0, kind === "table" ? 8 : 7).fill(colors.selected).stroke({ color: colors.canvas, width: 2 }));
+      container.addChild(new Graphics().circle(0, 0, 7).fill(colors.selected).stroke({ color: colors.canvas, width: 2 }));
       const node = nodeById.get(tableId)!;
       const point = { x: node.x + x, y: node.y + y };
-      const port: CreationPort = { container, tableId, columnId, kind, point, id: `${kind}:${tableId}:${columnId ?? "table"}:${x}`, minX: point.x, minY: point.y, maxX: point.x, maxY: point.y };
+      const port: CreationPort = { container, tableId, columnId, point, id: `field:${tableId}:${columnId}:${x}`, minX: point.x, minY: point.y, maxX: point.x, maxY: point.y };
       container.on("pointerdown", (event: FederatedPointerEvent) => beginRelationshipDrag(event, port));
-      creationPorts.push(port);
       creationPortIndex.insert(port);
       portsByTable.set(tableId, [...(portsByTable.get(tableId) ?? []), port]);
-      if (kind === "field" && columnId) {
-        const column = canvasIndexes.columnById.get(columnId);
-        if (column) {
-          const key = normalizeRelationshipType(column.dataType);
-          fieldPortsByType.set(key, [...(fieldPortsByType.get(key) ?? []), port]);
-        }
+      const column = canvasIndexes.columnById.get(columnId);
+      if (column) {
+        const key = normalizeRelationshipType(column.dataType);
+        fieldPortsByType.set(key, [...(fieldPortsByType.get(key) ?? []), port]);
       }
       card.addChild(container);
       return port;
     };
 
-    visible.forEach((tableId) => {
-      const table = canvasIndexes.tableById.get(tableId);
-      if (!table) return;
-      const node = nodeById.get(table.id);
+    const removeTableCard = (tableId: string) => {
+      portsByTable.get(tableId)?.forEach((port) => {
+        creationPortIndex.remove(port);
+        visibleCreationPorts.delete(port);
+        fieldPortsByType.forEach((ports, key) => {
+          const next = ports.filter((candidate) => candidate !== port);
+          if (next.length) fieldPortsByType.set(key, next);
+          else fieldPortsByType.delete(key);
+        });
+      });
+      portsByTable.delete(tableId);
+      columnIdsByTable.get(tableId)?.forEach((columnId) => {
+        columnVisualsById.delete(columnId);
+        columnSelectionGraphics.delete(columnId);
+      });
+      columnIdsByTable.delete(tableId);
+      tableBackgroundsById.delete(tableId);
+      const card = tableCardsById.get(tableId);
+      tableCardsById.delete(tableId);
+      if (card) {
+        card.removeFromParent();
+        card.destroy({ children: true });
+      }
+    };
+
+    const mountTableCard = (table: Table, node: LayoutNode) => {
       if (!node || !visible.has(node.id)) return;
       const tableSelected = activeSelectionTableId === table.id;
-      const card = new Container();
-      card.position.set(node.x, node.y);
-      card.eventMode = "static";
-      card.cursor = "pointer";
-      card.on("pointerenter", () => { if (!relationshipDrag) setTablePortVisibility(table.id, true); });
-      card.on("pointerleave", () => { if (!relationshipDrag) setTablePortVisibility(table.id, false); });
-      card.on("pointerdown", (event: FederatedPointerEvent) => {
-        event.stopPropagation();
-        routingGenerationRef.current += 1;
-        routingWorker?.terminate();
-        routingWorker = null;
-        activeInteraction = {
-          kind: "table-move",
-          pointerId: event.pointerId,
-          tableId: table.id,
-          card,
-          node,
-          startPointer: { x: event.global.x, y: event.global.y },
-          startCard: { x: card.x, y: card.y },
-          moved: false,
-        };
-      });
-
-      const accent = colorNumber(table.color);
-      const background = new Graphics();
-      drawCardBackground(background, node.width, node.height, accent, tableSelected);
-      tableBackgroundsById.set(table.id, { graphics: background, node, accent });
-      card.addChild(background);
-
-      const title = new Text({ text: table.name, style: titleStyle });
-      title.position.set(18, 15);
-      card.addChild(title);
-      const count = new Text({ text: `${table.columns.length} cols`, style: typeStyle });
-      count.anchor.set(1, 0);
-      count.position.set(node.width - 16, 18);
-      card.addChild(count);
-
-      table.columns.forEach((column, columnIndex) => {
-        const y = 58 + columnIndex * 34;
-        const connected = connectedColumnIds.has(column.id);
-        const row = new Container();
-        row.eventMode = "static";
-        row.cursor = "pointer";
-        row.hitArea = { contains: (x: number, py: number) => x >= 0 && x <= node.width && py >= 0 && py <= 32 };
-        row.on("pointertap", (event) => {
+      const render = createTableCard({
+        table,
+        node,
+        selected: tableSelected,
+        highlighted: highlightedTableIds.has(table.id),
+        selectedColumnId,
+        activeColor,
+        connectedColumnIds,
+        connectedPortSides,
+        onPointerEnter: (id) => { if (!relationshipDrag) setTablePortVisibility(id, true); },
+        onPointerLeave: (id) => { if (!relationshipDrag) setTablePortVisibility(id, false); },
+        onPointerDown: (event, card, targetNode) => {
           event.stopPropagation();
-          setSelection({ kind: "column", tableId: table.id, columnId: column.id });
-        });
-        row.position.set(0, y);
-        const rowBackground = new Graphics();
-        rowBackground.moveTo(0, 27).lineTo(node.width, 27).stroke({ color: colors.border, alpha: 0.7, width: 1 });
-        row.addChild(rowBackground);
-        const activeBackground = new Graphics();
-        if (connected) activeBackground.rect(1, -7, node.width - 2, 33).fill({ color: activeColor, alpha: tableSelected ? 0.34 : 0.22 });
-        row.addChildAt(activeBackground, 0);
-        const selectionBackground = new Graphics().rect(4, -5, node.width - 8, 30).fill({ color: activeColor, alpha: 0.2 });
-        selectionBackground.visible = selectedColumnId === column.id;
-        columnSelectionGraphics.set(column.id, selectionBackground);
-        row.addChild(selectionBackground);
-        if (column.primaryKey) {
-          const key = new Text({ text: "PK", style: badgeStyle });
-          key.position.set(14, 4);
-          row.addChild(key);
-        } else {
-          row.addChild(new Graphics().circle(22, 10, 3).fill(column.nullable ? colors.type : colors.selected));
-        }
-        const name = new Text({ text: column.name, style: connected ? new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, fontWeight: "600", fill: 0x69a7ff }) : columnStyle });
-        name.position.set(42, 0);
-        row.addChild(name);
-        const type = new Text({ text: column.dataType, style: connected ? new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, fill: 0x9bbfff }) : typeStyle });
-        type.anchor.set(1, 0);
-        type.position.set(node.width - 16, 3);
-        row.addChild(type);
-        const portSides = tableSelected ? new Set<AnchorSide>(["left", "right"]) : connectedPortSides.get(column.id);
-        const leftPort = new Graphics().circle(0, 10, 8).fill(activeColor).stroke({ color: colors.canvas, width: 2 });
-        const rightPort = new Graphics().circle(0, 10, 8).fill(activeColor).stroke({ color: colors.canvas, width: 2 });
-        rightPort.position.x = node.width;
-        leftPort.visible = Boolean(portSides?.has("left"));
-        rightPort.visible = Boolean(portSides?.has("right"));
-        row.addChild(leftPort, rightPort);
-        columnVisualsById.set(column.id, { tableId: table.id, activeBackground, name, type, leftPort, rightPort });
-        card.addChild(row);
+          routingGenerationRef.current += 1;
+          activeInteraction = {
+            kind: "table-move",
+            pointerId: event.pointerId,
+            tableId: table.id,
+            card,
+            node: targetNode,
+            startPointer: { x: event.global.x, y: event.global.y },
+            startCard: { x: card.x, y: card.y },
+            moved: false,
+          };
+        },
+        onFocusTable: focusTableEditor,
+        onChangeWidth: (id) => {
+          const currentDocument = documentRef.current;
+          const currentTable = currentDocument.tables.find((candidate) => candidate.id === id);
+          const currentNode = nodeById.get(id);
+          if (currentTable && currentNode) {
+            onReplaceRef.current("Change table width", updateTable(currentDocument, id, {
+              position: { x: Math.round(currentNode.x), y: Math.round(currentNode.y) },
+              widthScale: nextTableWidthScale(currentTable.widthScale),
+            }));
+          }
+        },
+        onSelectColumn: (id, columnId) => setSelection({ kind: "column", tableId: id, columnId }),
+        createPort,
       });
-      createPort(card, table.id, undefined, "table", 0, 25);
-      createPort(card, table.id, undefined, "table", node.width, 25);
-      table.columns.forEach((column, columnIndex) => {
-        const y = 68 + columnIndex * 34;
-        createPort(card, table.id, column.id, "field", 0, y);
-        createPort(card, table.id, column.id, "field", node.width, y);
-      });
+      render.columnSelections.forEach(({ columnId, graphic }) => columnSelectionGraphics.set(columnId, graphic));
+      render.columnVisuals.forEach(({ columnId, visual }) => columnVisualsById.set(columnId, visual));
+      columnIdsByTable.set(table.id, table.columns.map((column) => column.id));
+      const card = render.card;
+      tableBackgroundsById.set(table.id, render.background);
       tableCardsById.set(table.id, card);
-      world.addChild(card);
+      if (noteLayer.parent === world) world.addChildAt(card, world.getChildIndex(noteLayer));
+      else world.addChild(card);
+    };
+
+    visible.forEach((tableId) => {
+      const table = canvasIndexes.tableById.get(tableId);
+      const node = nodeById.get(tableId);
+      if (table && node) mountTableCard(table, node);
     });
     refreshColumnSelectionRef.current = (previousId, nextId) => {
       if (previousId) { const graphic = columnSelectionGraphics.get(previousId); if (graphic) graphic.visible = false; }
@@ -975,7 +1081,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       [previousId, nextId].forEach((tableId) => {
         if (!tableId) return;
         const record = tableBackgroundsById.get(tableId);
-        if (record) drawCardBackground(record.graphics, record.node.width, record.node.height, record.accent, tableId === nextId);
+        if (record) drawTableCardBackground(record.graphics, record.node.width, record.node.height, record.accent, tableId === nextId || highlightedTableIdsRef.current.has(tableId));
       });
       columnVisualsById.forEach((visual, columnId) => {
         const connected = connectedColumnIds.has(columnId);
@@ -985,10 +1091,10 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
           const record = tableBackgroundsById.get(visual.tableId);
           if (record) visual.activeBackground.rect(1, -7, record.node.width - 2, 33).fill({ color: activeColor, alpha: tableSelected ? 0.34 : 0.22 });
         }
-        visual.name.style = connected ? new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, fontWeight: "600", fill: 0x69a7ff }) : columnStyle;
-        visual.type.style = connected ? new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, fill: 0x9bbfff }) : typeStyle;
-        visual.leftPort.clear().circle(0, 10, 8).fill(activeColor).stroke({ color: colors.canvas, width: 2 });
-        visual.rightPort.clear().circle(0, 10, 8).fill(activeColor).stroke({ color: colors.canvas, width: 2 });
+        visual.name.style = connected ? new TextStyle({ fontFamily: "Inter, system-ui, sans-serif", fontSize: 13, fontWeight: "600", fill: 0x69a7ff }) : tableColumnStyle;
+        visual.type.style = connected ? new TextStyle({ fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 11, fill: 0x9bbfff }) : tableTypeStyle;
+        visual.leftPort.clear().circle(0, 10, 8).fill(activeColor).stroke({ color: tableCardColors.canvas, width: 2 });
+        visual.rightPort.clear().circle(0, 10, 8).fill(activeColor).stroke({ color: tableCardColors.canvas, width: 2 });
         const sides = connectedPortSides.get(columnId);
         visual.leftPort.visible = tableSelected || Boolean(sides?.has("left"));
         visual.rightPort.visible = tableSelected || Boolean(sides?.has("right"));
@@ -1007,18 +1113,49 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     };
 
     areaRenders.forEach((render) => world.addChild(render.label, render.resizeTarget));
+    world.addChild(noteLayer);
+    let retainedSnapshot = createCanvasSnapshot(document);
+    let retainedChangesRevision = changes?.revision ?? 0;
+
+    const syncChangedTableIndexes = (nextDocument: SchemaDocument, tableIds: ReadonlySet<string>) => {
+      tableIds.forEach((tableId) => {
+        const previous = canvasIndexes.tableById.get(tableId);
+        previous?.columns.forEach((column) => canvasIndexes.columnById.delete(column.id));
+        const next = nextDocument.tables.find((table) => table.id === tableId);
+        if (!next) {
+          canvasIndexes.tableById.delete(tableId);
+          return;
+        }
+        canvasIndexes.tableById.set(tableId, next);
+        next.columns.forEach((column) => canvasIndexes.columnById.set(column.id, column));
+      });
+    };
 
     geometryControllerRef.current = {
-      reconcile: (nextDocument, nextNodes) => {
+      reconcile: (nextDocument, nextNodes, nextChanges) => {
+        const nextSnapshot = createCanvasSnapshot(nextDocument);
+        const snapshotDiff = diffCanvasSnapshots(retainedSnapshot, nextSnapshot);
+        const targeted = Boolean(nextChanges && nextChanges.revision !== retainedChangesRevision && !nextChanges.topology);
+        if (nextChanges) retainedChangesRevision = nextChanges.revision;
+        const targetedTableIds = targeted ? new Set(nextChanges!.tableIds) : null;
+        const targetedAreaIds = targeted ? new Set(nextChanges!.areaIds) : null;
+        const targetedNoteIds = targeted ? new Set(nextChanges!.noteIds) : null;
         const changedNodeBounds: LayoutNode[] = [];
         const changedTableIds = new Set<string>();
+        const cardsToRefresh = new Set([...snapshotDiff.contentChanged, ...snapshotDiff.styleChanged]);
+        syncChangedTableIndexes(nextDocument, targetedTableIds ?? cardsToRefresh);
         let needsVisibilityRefresh = false;
         nextNodes.forEach((nextNode) => {
+          if (targetedTableIds && !targetedTableIds.has(nextNode.id)) return;
           const retainedNode = nodeById.get(nextNode.id);
           if (!retainedNode) return;
+          const table = nextDocument.tables.find((item) => item.id === nextNode.id);
+          const commentOffset = table?.commentOffset ?? { x: nextNode.width + tableCommentSize.gap, y: 0 };
+          tableCommentContainersByTableId.get(nextNode.id)?.position.set(nextNode.x + commentOffset.x, nextNode.y + commentOffset.y);
           if (retainedNode.x === nextNode.x && retainedNode.y === nextNode.y && retainedNode.width === nextNode.width && retainedNode.height === nextNode.height) return;
           changedNodeBounds.push({ ...retainedNode }, { ...nextNode });
           changedTableIds.add(nextNode.id);
+          if (retainedNode.width !== nextNode.width || retainedNode.height !== nextNode.height) cardsToRefresh.add(nextNode.id);
           Object.assign(retainedNode, nextNode);
           if (!tableCardsById.has(nextNode.id) && nextNode.x <= retainedViewportBounds.maxX && nextNode.x + nextNode.width >= retainedViewportBounds.minX && nextNode.y <= retainedViewportBounds.maxY && nextNode.y + nextNode.height >= retainedViewportBounds.minY) needsVisibilityRefresh = true;
           tableCardsById.get(nextNode.id)?.position.set(nextNode.x, nextNode.y);
@@ -1033,16 +1170,28 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
           });
         });
 
+        cardsToRefresh.forEach((tableId) => {
+          const table = canvasIndexes.tableById.get(tableId);
+          const node = nodeById.get(tableId);
+          if (!table || !node || !tableCardsById.has(tableId)) return;
+          removeTableCard(tableId);
+          mountTableCard(table, node);
+        });
+
         nextDocument.areas.forEach((area) => {
+          if (targetedAreaIds && !targetedAreaIds.has(area.id)) return;
           const render = areaRenders.get(area.id);
           if (!render) return;
           if (render.frame.x !== area.x || render.frame.y !== area.y) positionAreaRender(render, area.x, area.y);
           if (render.width !== area.width || render.height !== area.height) sizeAreaRender(render, area.width, area.height);
         });
-        nextDocument.notes.forEach((note) => noteContainersById.get(note.id)?.position.set(note.x, note.y));
+        nextDocument.notes.forEach((note) => {
+          if (!targetedNoteIds || targetedNoteIds.has(note.id)) noteContainersById.get(note.id)?.position.set(note.x, note.y);
+        });
 
         if (needsVisibilityRefresh) setViewportVersion((version) => version + 1);
 
+        retainedSnapshot = nextSnapshot;
         if (changedTableIds.size === 0) return;
         const changedObstacles = inflateRoutingObstacles(changedNodeBounds);
         const dirtyRoutes = new Set<string>();
@@ -1073,11 +1222,14 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
 
       if (interaction.kind === "table-move") {
         const rawPosition = moveArea(interaction.startCard, delta);
-        const position = snapToGridRef.current ? snapPoint(rawPosition) : rawPosition;
+        const position = pixelPoint(snapToGridRef.current ? snapPoint(rawPosition) : rawPosition);
         interaction.moved ||= Math.abs(position.x - interaction.startCard.x) + Math.abs(position.y - interaction.startCard.y) > 2;
         interaction.card.position.set(position.x, position.y);
         interaction.node.x = position.x;
         interaction.node.y = position.y;
+        const table = documentRef.current.tables.find((item) => item.id === interaction.tableId);
+        const commentOffset = table?.commentOffset ?? { x: interaction.node.width + tableCommentSize.gap, y: 0 };
+        tableCommentContainersByTableId.get(interaction.tableId)?.position.set(position.x + commentOffset.x, position.y + commentOffset.y);
         updateSpatialItem(interaction.tableId, interaction.node);
         relationshipIdsByTable.get(interaction.tableId)?.forEach((relationshipId) => dirtyRelationshipIds.add(relationshipId));
         return;
@@ -1090,7 +1242,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
         interaction.moved ||= Math.abs(position.x - interaction.startArea.x) + Math.abs(position.y - interaction.startArea.y) > 2;
         positionAreaRender(interaction.render, position.x, position.y);
         interaction.tableStarts.forEach((start, tableId) => {
-          const tablePosition = moveArea(start, appliedDelta);
+          const tablePosition = pixelPoint(moveArea(start, appliedDelta));
           const node = nodeById.get(tableId);
           if (node) {
             node.x = tablePosition.x;
@@ -1098,8 +1250,23 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
             updateSpatialItem(tableId, node);
           }
           tableCardsById.get(tableId)?.position.set(tablePosition.x, tablePosition.y);
+          const table = documentRef.current.tables.find((item) => item.id === tableId);
+          const commentOffset = table?.commentOffset ?? { x: (node?.width ?? 0) + tableCommentSize.gap, y: 0 };
+          tableCommentContainersByTableId.get(tableId)?.position.set(tablePosition.x + commentOffset.x, tablePosition.y + commentOffset.y);
           relationshipIdsByTable.get(tableId)?.forEach((relationshipId) => dirtyRelationshipIds.add(relationshipId));
         });
+        interaction.noteStarts.forEach((start, noteId) => {
+          const notePosition = pixelPoint(moveArea(start, appliedDelta));
+          noteContainersById.get(noteId)?.position.set(notePosition.x, notePosition.y);
+        });
+        return;
+      }
+
+      if (interaction.kind === "note-move" || interaction.kind === "table-comment-move") {
+        const rawPosition = moveArea(interaction.startPosition, delta);
+        const position = pixelPoint(snapToGridRef.current ? snapPoint(rawPosition) : rawPosition);
+        interaction.moved ||= Math.abs(position.x - interaction.startPosition.x) + Math.abs(position.y - interaction.startPosition.y) > 2;
+        interaction.container.position.set(position.x, position.y);
         return;
       }
 
@@ -1157,10 +1324,39 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
         return;
       }
 
+
+      if (interaction.kind === "note-move") {
+        if (!interaction.moved) return;
+        const currentDocument = documentRef.current;
+        let next = updateNote(currentDocument, interaction.noteId, { x: interaction.container.x, y: interaction.container.y });
+        const center = { x: interaction.container.x + tableCommentSize.width / 2, y: interaction.container.y + tableCommentSize.height / 2 };
+        const targetArea = [...currentDocument.areas].reverse().find((area) => !area.locked && center.x >= area.x && center.x <= area.x + area.width && center.y >= area.y && center.y <= area.y + area.height);
+        next = assignNoteToArea(next, interaction.noteId, targetArea?.id ?? null);
+        onReplaceRef.current(targetArea ? `Move note into ${targetArea.name}` : "Move note", next);
+        return;
+      }
+
+      if (interaction.kind === "table-comment-move") {
+        if (!interaction.moved) return;
+        const currentDocument = documentRef.current;
+        const table = currentDocument.tables.find((item) => item.id === interaction.tableId);
+        const node = nodeById.get(interaction.tableId);
+        if (!table || !node) return;
+        onReplaceRef.current("Move table comment", updateTable(currentDocument, table.id, { commentOffset: { x: interaction.container.x - node.x, y: interaction.container.y - node.y } }));
+        return;
+      }
+
       if (!interaction.moved) return;
       if (interaction.kind === "area-resize") {
         const currentDocument = documentRef.current;
-        onReplaceRef.current("Resize area", updateArea(currentDocument, interaction.render.area.id, { width: interaction.render.width, height: interaction.render.height }));
+        let next = updateArea(currentDocument, interaction.render.area.id, { width: interaction.render.width, height: interaction.render.height });
+        const tableBounds = [...nodeById.values()].map((node) => ({ id: node.id, x: node.x, y: node.y, width: node.width, height: node.height }));
+        const noteBounds = currentDocument.notes.map((note) => {
+          const position = noteContainersById.get(note.id);
+          return { id: note.id, x: position?.x ?? note.x, y: position?.y ?? note.y, width: 220, height: 110 };
+        });
+        next = captureAreaContents(next, interaction.render.area.id, tableBounds, noteBounds);
+        onReplaceRef.current("Resize area", next);
         return;
       }
 
@@ -1169,6 +1365,10 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       interaction.tableStarts.forEach((_start, tableId) => {
         const node = nodeById.get(tableId);
         if (node) next = updateTable(next, tableId, { position: { x: node.x, y: node.y } });
+      });
+      interaction.noteStarts.forEach((_start, noteId) => {
+        const note = noteContainersById.get(noteId);
+        if (note) next = updateNote(next, noteId, { x: note.x, y: note.y });
       });
       onReplaceRef.current("Move area", next);
     };
@@ -1184,8 +1384,15 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
         interaction.card.position.set(interaction.startCard.x, interaction.startCard.y);
         interaction.node.x = interaction.startCard.x;
         interaction.node.y = interaction.startCard.y;
+        const table = documentRef.current.tables.find((item) => item.id === interaction.tableId);
+        const commentOffset = table?.commentOffset ?? { x: interaction.node.width + tableCommentSize.gap, y: 0 };
+        tableCommentContainersByTableId.get(interaction.tableId)?.position.set(interaction.startCard.x + commentOffset.x, interaction.startCard.y + commentOffset.y);
         updateSpatialItem(interaction.tableId, interaction.node);
         relationshipIdsByTable.get(interaction.tableId)?.forEach((relationshipId) => dirtyRelationshipIds.add(relationshipId));
+        return;
+      }
+      if (interaction.kind === "note-move" || interaction.kind === "table-comment-move") {
+        interaction.container.position.set(interaction.startPosition.x, interaction.startPosition.y);
         return;
       }
       if (interaction.kind === "area-resize") {
@@ -1200,9 +1407,14 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
           node.y = start.y;
           updateSpatialItem(tableId, node);
         }
-        tableCardsById.get(tableId)?.position.set(start.x, start.y);
+        const tablePosition = pixelPoint(start);
+        tableCardsById.get(tableId)?.position.set(tablePosition.x, tablePosition.y);
+        const table = documentRef.current.tables.find((item) => item.id === tableId);
+        const commentOffset = table?.commentOffset ?? { x: (node?.width ?? 0) + tableCommentSize.gap, y: 0 };
+        tableCommentContainersByTableId.get(tableId)?.position.set(tablePosition.x + commentOffset.x, tablePosition.y + commentOffset.y);
         relationshipIdsByTable.get(tableId)?.forEach((relationshipId) => dirtyRelationshipIds.add(relationshipId));
       });
+      interaction.noteStarts.forEach((start, noteId) => noteContainersById.get(noteId)?.position.set(start.x, start.y));
     };
 
     app.stage.on("globalpointermove", moveActiveInteraction);
@@ -1216,21 +1428,12 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       if (!relationshipDrag || pointerId !== relationshipDrag.pointerId) return;
       if (activeTargetPort) activeTargetPort.container.scale.set(1);
       activeTargetPort = null;
-      if (relationshipDrag.kind === "field" && relationshipDrag.sourceColumnId) {
-        const target = fieldPortAtPoint(point);
-        if (target?.columnId && canCreateRelationship(documentRef.current, relationshipDrag.sourceTableId, relationshipDrag.sourceColumnId, target.tableId, target.columnId)) {
-          target.container.scale.set(1.35);
-          activeTargetPort = target;
-          drawRelationshipPreview(target.point);
-          return;
-        }
-      } else {
-        const targetTable = tableAtPoint(point);
-        if (targetTable && targetTable.id !== relationshipDrag.sourceTableId) {
-          const node = nodeById.get(targetTable.id)!;
-          drawRelationshipPreview({ x: point.x < node.x + node.width / 2 ? node.x : node.x + node.width, y: node.y + 25 });
-          return;
-        }
+      const target = fieldPortAtPoint(point);
+      if (target && canCreateRelationship(documentRef.current, relationshipDrag.sourceTableId, relationshipDrag.sourceColumnId, target.tableId, target.columnId)) {
+        target.container.scale.set(1.35);
+        activeTargetPort = target;
+        drawRelationshipPreview(target.point);
+        return;
       }
       drawRelationshipPreview(point);
     };
@@ -1262,21 +1465,10 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       const drag = relationshipDrag;
       if (!drag || event.pointerId !== drag.pointerId) return;
       const point = worldPointFromEvent(event);
-      if (drag.kind === "field" && drag.sourceColumnId) {
-        const target = fieldPortAtPoint(point);
-        const currentDocument = documentRef.current;
-        if (target?.columnId && canCreateRelationship(currentDocument, drag.sourceTableId, drag.sourceColumnId, target.tableId, target.columnId)) {
-          onReplaceRef.current("Add relationship", addRelationship(currentDocument, drag.sourceTableId, drag.sourceColumnId, target.tableId, target.columnId));
-        }
-      } else {
-        const targetTable = tableAtPoint(point);
-        if (targetTable && targetTable.id !== drag.sourceTableId) {
-          const candidates = relationshipCandidates(documentRef.current, drag.sourceTableId, targetTable.id);
-          if (candidates.length > 0) {
-            setRelationshipChoiceIndex(0);
-            setRelationshipChoice({ candidates, x: Math.max(12, Math.min(app.screen.width - 332, event.global.x)), y: Math.max(12, Math.min(app.screen.height - 270, event.global.y)) });
-          }
-        }
+      const target = fieldPortAtPoint(point);
+      const currentDocument = documentRef.current;
+      if (target && canCreateRelationship(currentDocument, drag.sourceTableId, drag.sourceColumnId, target.tableId, target.columnId)) {
+        onReplaceRef.current("Add relationship", addRelationship(currentDocument, drag.sourceTableId, drag.sourceColumnId, target.tableId, target.columnId));
       }
       cancelRelationshipDrag();
     };
@@ -1286,7 +1478,6 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     const cancelRelationshipOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       cancelRelationshipDrag();
-      setRelationshipChoice(null);
     };
     app.stage.on("globalpointermove", moveRelationshipDrag);
     app.stage.on("pointerup", finishRelationshipDrag);
@@ -1312,7 +1503,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       app.stage.off("pointercancel", cancelRelationshipPointer);
       window.removeEventListener("keydown", cancelRelationshipOnEscape);
       routingGenerationRef.current += 1;
-      routingWorker?.terminate();
+      routingResponseRef.current = () => undefined;
       relationshipHitTestRef.current = () => false;
       refreshRelationshipSelectionRef.current = () => undefined;
       refreshColumnSelectionRef.current = () => undefined;
@@ -1322,17 +1513,17 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       tickerCleanupRef.current();
       tickerCleanupRef.current = () => undefined;
     };
-  }, [rendererReady, sceneStructureKey, setSelection, viewportVersion]);
+  }, [rendererReady, sceneStructureKey, effectiveSceneLayoutKey, setSelection, focusTableEditor, viewportVersion]);
 
-  useEffect(() => {
-    geometryControllerRef.current?.reconcile(document, effectiveNodes);
-  }, [document, effectiveNodes, rendererReady, sceneStructureKey]);
+  useLayoutEffect(() => {
+    geometryControllerRef.current?.reconcile(document, effectiveNodes, changes);
+  }, [changes, document, effectiveNodes, rendererReady, sceneStructureKey]);
 
   const previousSelectedRelationshipIdRef = useRef<string | null>(null);
   useEffect(() => {
-    refreshRelationshipSelectionRef.current(previousSelectedRelationshipIdRef.current, selectedRelationshipId);
-    previousSelectedRelationshipIdRef.current = selectedRelationshipId;
-  }, [selectedRelationshipId]);
+    refreshRelationshipSelectionRef.current(previousSelectedRelationshipIdRef.current, visualRelationshipId);
+    previousSelectedRelationshipIdRef.current = visualRelationshipId;
+  }, [visualRelationshipId]);
 
   const previousSelectedColumnIdRef = useRef<string | null>(null);
   useEffect(() => {
@@ -1365,7 +1556,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     lastZoomInRequest.current = zoomInRequest;
     const app = appRef.current;
     if (!app) return;
-    viewportRef.current = zoomAround(viewportRef.current, { x: app.screen.width / 2, y: app.screen.height / 2 }, viewportRef.current.scale * 1.25);
+    viewportRef.current = zoomViewportAtCenter(viewportRef.current, app.screen, viewportRef.current.scale * 1.25);
     syncViewportRef.current();
     refreshViewportCullingRef.current();
   }, [zoomInRequest]);
@@ -1375,7 +1566,7 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     lastZoomOutRequest.current = zoomOutRequest;
     const app = appRef.current;
     if (!app) return;
-    viewportRef.current = zoomAround(viewportRef.current, { x: app.screen.width / 2, y: app.screen.height / 2 }, viewportRef.current.scale / 1.25);
+    viewportRef.current = zoomViewportAtCenter(viewportRef.current, app.screen, viewportRef.current.scale / 1.25);
     syncViewportRef.current();
     refreshViewportCullingRef.current();
   }, [zoomOutRequest]);
@@ -1390,6 +1581,11 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
     const app = appRef.current;
     const world = worldRef.current;
     if (!app || !world || layout.nodes.length === 0) return;
+    const explicitFit = fitRequest !== lastFitRequest.current;
+    const layoutGeneration = layout.generation ?? 0;
+    if (!shouldFitLayoutGeneration(lastFittedLayoutGenerationRef.current, layout.generation, explicitFit)) return;
+    lastFitRequest.current = fitRequest;
+    lastFittedLayoutGenerationRef.current = layoutGeneration;
     const { minX, minY, maxX, maxY } = workspaceBoundsRef.current;
     const scale = scaleToFit(app.screen.width, app.screen.height, { minX, minY, maxX, maxY });
     const viewport = viewportRef.current;
@@ -1402,32 +1598,69 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
 
   useEffect(() => { syncViewportRef.current(); }, [workspaceBounds, minimapVisible]);
 
+  useEffect(() => {
+    if (!objectMenu) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setObjectMenu(null); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [objectMenu]);
+
+  const menuArea = objectMenu?.kind === "area" ? document.areas.find((area) => area.id === objectMenu.id) : undefined;
+  const menuNote = objectMenu?.kind === "note" ? document.notes.find((note) => note.id === objectMenu.id) : undefined;
+  const menuTable = objectMenu?.kind === "table-comment" ? document.tables.find((table) => table.id === objectMenu.id) : undefined;
+  const menuColor = menuArea?.color ?? menuNote?.color ?? menuTable?.commentColor ?? menuTable?.color;
+  const menuTitle = menuArea?.name ?? (menuNote ? "Note" : menuTable ? `${menuTable.schema ? `${menuTable.schema}.` : ""}${menuTable.name}` : "");
+  const changeObjectColor = (color: string) => {
+    if (!objectMenu) return;
+    if (menuArea) onReplace("Change area color", updateArea(document, menuArea.id, { color }));
+    else if (menuNote) onReplace("Change note color", updateNote(document, menuNote.id, { color }));
+    else if (menuTable) onReplace("Change table comment color", updateTable(document, menuTable.id, { commentColor: color }));
+  };
+  const editObject = () => {
+    if (!objectMenu) return;
+    setActivePanel("visuals");
+    setVisualsTab(objectMenu.kind === "area" ? "areas" : "notes");
+    setObjectMenu(null);
+  };
+  const toggleAreaLock = () => {
+    if (menuArea) onReplace("Toggle area lock", updateArea(document, menuArea.id, { locked: !menuArea.locked }));
+  };
+  const toggleAreaMoveContents = () => {
+    if (!menuArea) return;
+    let next = updateArea(document, menuArea.id, { moveContents: !menuArea.moveContents });
+    if (!menuArea.moveContents) next = captureAreaWithCurrentBounds(next, menuArea.id);
+    onReplace("Toggle moving area contents", next);
+  };
+  const deleteObject = () => {
+    if (!objectMenu) return;
+    if (!objectMenu.confirmingDelete) {
+      setObjectMenu({ ...objectMenu, confirmingDelete: true });
+      return;
+    }
+    if (menuArea) onReplace("Delete area", deleteArea(document, menuArea.id));
+    else if (menuNote) onReplace("Delete note", deleteNote(document, menuNote.id));
+    else if (menuTable) onReplace("Delete table comment", updateTable(document, menuTable.id, { comment: "" }));
+    setObjectMenu(null);
+  };
+  const menuLeft = objectMenu ? Math.max(8, Math.min(objectMenu.x + 12, (hostRef.current?.clientWidth ?? objectMenu.x + 240) - 224)) : 0;
+  const menuHeight = menuArea ? 150 : 104;
+  const menuTop = objectMenu ? Math.max(8, Math.min(objectMenu.y + 12, (hostRef.current?.clientHeight ?? objectMenu.y + menuHeight + 20) - menuHeight)) : 0;
+
   return (
     <div className="canvas-shell" ref={hostRef}>
-      <div className="canvas-hint">Drag to pan · Scroll to zoom · Click a field to edit</div>
-      <div className="zoom-badge">PIXIJ‍S · RBUSH · ELK</div>
-      {relationshipChoice && <div className="relationship-picker" style={{ left: relationshipChoice.x, top: relationshipChoice.y }} onKeyDown={(event) => {
-        if (event.key === "Escape") setRelationshipChoice(null);
-        else if (event.key === "ArrowDown") { event.preventDefault(); setRelationshipChoiceIndex((index) => Math.min(relationshipChoice.candidates.length - 1, index + 1)); }
-        else if (event.key === "ArrowUp") { event.preventDefault(); setRelationshipChoiceIndex((index) => Math.max(0, index - 1)); }
-        else if (event.key === "Enter") {
-          const candidate = relationshipChoice.candidates[relationshipChoiceIndex];
-          if (candidate) {
-            onReplace("Add relationship", addRelationship(document, candidate.sourceTableId, candidate.sourceColumnId, candidate.targetTableId, candidate.targetColumnId));
-            setRelationshipChoice(null);
-          }
-        }
-      }}>
-        <header><strong>Connect fields</strong><button onClick={() => setRelationshipChoice(null)} aria-label="Close">×</button></header>
-        <p>Compatible field pairs</p>
-        <div>{relationshipChoice.candidates.map((candidate, index) => {
-          const sourceTable = canvasIndexes.tableById.get(candidate.sourceTableId)?.name;
-          const targetTable = canvasIndexes.tableById.get(candidate.targetTableId)?.name;
-          return <button key={`${candidate.sourceColumnId}:${candidate.targetColumnId}`} autoFocus={index === 0} className={index === relationshipChoiceIndex ? "active" : ""} onFocus={() => setRelationshipChoiceIndex(index)} onClick={() => {
-            onReplace("Add relationship", addRelationship(document, candidate.sourceTableId, candidate.sourceColumnId, candidate.targetTableId, candidate.targetColumnId));
-            setRelationshipChoice(null);
-          }}><span><b>{sourceTable}.{candidate.sourceName}</b><i>→</i><b>{targetTable}.{candidate.targetName}</b></span><small>{candidate.dataType}</small></button>;
-        })}</div>
+      <div className="canvas-hint">Drag to pan · Two-finger pan · Pinch to zoom · Use ○ to edit a table</div>
+      {rendererError && <div className="canvas-renderer-error" role="alert">{rendererError}</div>}
+      {objectMenu && menuColor && <div className="canvas-object-popover" style={{ left: menuLeft, top: menuTop }} onPointerDown={(event) => event.stopPropagation()}>
+        <header><strong title={menuTitle}>{menuTitle}</strong><span>{objectMenu.kind === "area" ? "Area" : objectMenu.kind === "note" ? "Note" : "Table comment"}</span></header>
+        <div className="canvas-object-colors" aria-label="Object color">{palette.map((color) => <button key={color} title={color} aria-label={`Use ${color}`} aria-pressed={menuColor === color} style={{ "--swatch-color": color } as React.CSSProperties} onClick={() => changeObjectColor(color)}>{menuColor === color && <Check size={12} />}</button>)}</div>
+        {menuArea && <div className="canvas-area-toggles">
+          <button aria-pressed={menuArea.locked} onClick={toggleAreaLock}><Lock size={13} /><span>Lock</span></button>
+          <button aria-pressed={menuArea.moveContents} onClick={toggleAreaMoveContents}><MoveIcon size={13} /><span>Move tables</span></button>
+        </div>}
+        <footer>
+          <button title="Edit in Visuals" onClick={editObject}><Pencil size={14} /></button>
+          <button className={objectMenu.confirmingDelete ? "confirm-delete" : "danger"} title={objectMenu.confirmingDelete ? "Confirm delete" : "Delete"} onClick={deleteObject}>{objectMenu.confirmingDelete ? <Check size={14} /> : <Trash2 size={14} />}</button>
+        </footer>
       </div>}
       {minimapVisible && <div className="minimap" aria-label="Workspace minimap" onPointerDown={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
@@ -1436,7 +1669,8 @@ export function DiagramCanvas({ document, layout, onReplace }: DiagramCanvasProp
       }}>
         {document.areas.map((area) => { const start = projectPoint({ x: area.x, y: area.y }, workspaceBounds); return <i key={area.id} style={{ left: `${start.x * 100}%`, top: `${start.y * 100}%`, width: `${area.width / (workspaceBounds.maxX - workspaceBounds.minX) * 100}%`, height: `${area.height / (workspaceBounds.maxY - workspaceBounds.minY) * 100}%`, borderColor: area.color }} />; })}
         {document.notes.map((note) => { const point = projectPoint(note, workspaceBounds); return <em key={note.id} style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%`, background: note.color }} />; })}
-        {effectiveNodes.map((node) => { const table = canvasIndexes.tableById.get(node.id); const point = projectPoint(node, workspaceBounds); return <b key={node.id} style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%`, background: table?.color }} />; })}
+        {tableCommentAnnotations.map((note) => { const point = projectPoint(note, workspaceBounds); return <em key={`comment:${note.tableId}`} style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%`, background: note.color }} />; })}
+        {effectiveNodes.map((node) => { const table = liveTableById.get(node.id); const point = projectPoint(node, workspaceBounds); return <b key={node.id} style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%`, background: table?.color }} />; })}
         <u ref={minimapViewportRef} />
       </div>}
     </div>

@@ -1,4 +1,5 @@
 import type { Column, Relationship, SchemaDocument, Table } from "./types";
+import { normalizeTableWidthScale } from "./tableGeometry";
 
 export interface CanvasIndexes {
   tableById: Map<string, Table>;
@@ -51,7 +52,7 @@ export function createCanvasSnapshot(document: SchemaDocument): CanvasSnapshot {
   return {
     source: document.source,
     tables: new Map(document.tables.map((table) => [table.id, {
-      geometry: `${table.position.x}:${table.position.y}:${table.collapsed}`,
+      geometry: `${table.position.x}:${table.position.y}:${table.collapsed}:${normalizeTableWidthScale(table.widthScale)}`,
       content: `${table.name}|${table.columns.map((column) => `${column.id}:${column.name}:${column.dataType}:${column.nullable}:${column.primaryKey}:${column.unique}`).join("|")}`,
       style: table.color,
     }])),

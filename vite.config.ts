@@ -1,10 +1,24 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import type { Plugin } from "vite";
+import { scanDevelopmentWorkspace } from "./dev/workspaceFixture";
 
 const host = process.env.TAURI_DEV_HOST;
+const developmentWorkspaceRoot = "/Users/cg/Downloads/chartdb-folder-test";
+
+function developmentWorkspacePlugin(): Plugin {
+  return { name: "dbstudio-development-workspace", apply: "serve", configureServer(server) {
+    server.middlewares.use("/__viewdb/development-workspace", async (_request, response) => {
+      response.setHeader("Content-Type", "application/json; charset=utf-8"); response.setHeader("Cache-Control", "no-store");
+      try { response.statusCode = 200; response.end(JSON.stringify(await scanDevelopmentWorkspace(developmentWorkspaceRoot))); }
+      catch (error) { response.statusCode = 404; response.end(JSON.stringify({ error: error instanceof Error ? error.message : "The development workspace fixture could not be loaded." })); }
+    });
+  } };
+}
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), developmentWorkspacePlugin()],
+  define: { __APP_VERSION__: JSON.stringify(process.env.npm_package_version ?? "0.0.0-dev") },
   clearScreen: false,
   server: {
     port: 5173,

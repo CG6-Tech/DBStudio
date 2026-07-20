@@ -96,6 +96,8 @@ export interface CheckConstraint {
   isNew?: boolean;
 }
 
+export type TableWidthScale = 1 | 1.5 | 2;
+
 export interface Table {
   id: string;
   name: string;
@@ -104,12 +106,20 @@ export interface Table {
   columns: Column[];
   indexes: TableIndex[];
   checkConstraints: CheckConstraint[];
+  comment?: string;
+  originalComment?: string;
+  commentStatementRange?: SourceRange;
+  commentValueRange?: SourceRange;
+  commentVisible?: boolean;
+  commentOffset?: { x: number; y: number };
+  commentColor?: string;
   nameRange: SourceRange;
   statementRange: SourceRange;
   tableOptions?: string;
   position: { x: number; y: number };
   color: string;
   collapsed: boolean;
+  widthScale?: TableWidthScale;
   isNew?: boolean;
 }
 
@@ -122,6 +132,7 @@ export interface DiagramArea {
   width: number;
   height: number;
   tableIds: string[];
+  noteIds?: string[];
   locked: boolean;
   collapsed: boolean;
   moveContents: boolean;
@@ -146,6 +157,66 @@ export interface Relationship {
   targetColumnReferenceRange: SourceRange;
 }
 
+export interface RoutineParameter {
+  name?: string;
+  mode?: "in" | "out" | "inout" | "variadic";
+  dataType: string;
+}
+
+export interface LogicReference {
+  schema?: string;
+  name: string;
+  resolvedId?: string;
+  range?: SourceRange;
+  dynamic?: boolean;
+}
+
+export interface Routine {
+  id: string;
+  kind: "function" | "procedure";
+  name: string;
+  schema?: string;
+  parameters: RoutineParameter[];
+  returnType?: string;
+  language?: string;
+  body: string;
+  definitionSql: string;
+  statementRange: SourceRange;
+  calls: LogicReference[];
+  reads: LogicReference[];
+  inserts: LogicReference[];
+  updates: LogicReference[];
+  deletes: LogicReference[];
+  partial: boolean;
+}
+
+export interface DatabaseTrigger {
+  id: string;
+  name: string;
+  schema?: string;
+  timing?: "before" | "after" | "instead of";
+  events: Array<"insert" | "update" | "delete" | "truncate">;
+  scope?: "row" | "statement";
+  targetTable: LogicReference;
+  condition?: string;
+  executedRoutine?: LogicReference;
+  body?: string;
+  definitionSql: string;
+  statementRange: SourceRange;
+  partial: boolean;
+}
+
+export type LogicEdgeKind = "table-event" | "executes" | "calls" | "reads" | "inserts" | "updates" | "deletes";
+
+export interface LogicEdge {
+  id: string;
+  kind: LogicEdgeKind;
+  sourceId: string;
+  targetId?: string;
+  unresolvedTarget?: LogicReference;
+  label: string;
+}
+
 export interface Diagnostic {
   level: "warning" | "error";
   message: string;
@@ -162,6 +233,20 @@ export interface SchemaDocument {
   areas: DiagramArea[];
   notes: DiagramNote[];
   customTypes: CustomType[];
+  triggers: DatabaseTrigger[];
+  routines: Routine[];
+  logicEdges: LogicEdge[];
+  logicLayout?: {
+    nodes: Array<{ id: string; position: { x: number; y: number }; pinned?: boolean }>;
+    viewport: { x: number; y: number; scale: number };
+    algorithmVersion?: number;
+  };
+  routineFlowLayouts?: Record<string, {
+    nodes: Array<{ id: string; position: { x: number; y: number }; pinned?: boolean }>;
+    scale: number;
+    viewport?: { x: number; y: number; scale: number };
+    algorithmVersion?: number;
+  }>;
   structuralTableIds: string[];
   removedStatementRanges: SourceRange[];
 }

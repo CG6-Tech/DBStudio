@@ -1,3 +1,3 @@
 fn main() {
-    viewdb_lib::run();
+    dbstudio_lib::run();
 }

@@ -1,4 +1,4 @@
--- ViewDB two-table example
+-- DBStudio two-table example
 CREATE TABLE users (
   id BIGSERIAL PRIMARY KEY,
   email TEXT NOT NULL,

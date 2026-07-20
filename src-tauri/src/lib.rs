@@ -9,11 +9,14 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+mod workspace;
+mod migration;
+
 const EXAMPLE_SQL: &str = include_str!("../assets/two-table-example.sql");
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum SqlDialect {
+pub(crate) enum SqlDialect {
     Postgresql,
     Mysql,
 }
@@ -38,11 +41,11 @@ struct SaveResult {
     backup_path: Option<String>,
 }
 
-fn hash_source(source: &str) -> String {
+pub(crate) fn hash_source(source: &str) -> String {
     hex::encode(Sha256::digest(source.as_bytes()))
 }
 
-fn modified_ms(path: &Path) -> Option<u64> {
+pub(crate) fn modified_ms(path: &Path) -> Option<u64> {
     fs::metadata(path)
         .ok()?
         .modified()
@@ -64,7 +67,7 @@ fn validate_mysql(source: &str) -> Result<(), String> {
         .map_err(|error| format!("MySQL parser rejected the SQL: {error}"))
 }
 
-fn validate_dialect(source: &str, dialect: SqlDialect) -> Result<(), String> {
+pub(crate) fn validate_dialect(source: &str, dialect: SqlDialect) -> Result<(), String> {
     match dialect {
         SqlDialect::Postgresql => validate_postgres(source),
         SqlDialect::Mysql => validate_mysql(source),
@@ -113,7 +116,7 @@ fn read_document(path: &Path) -> Result<OpenedDocument, String> {
     })
 }
 
-fn backup_path(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn backup_path(path: &Path) -> Result<PathBuf, String> {
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -124,9 +127,27 @@ fn backup_path(path: &Path) -> Result<PathBuf, String> {
     )))
 }
 
-fn metadata_path(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn metadata_paths(path: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
+    if path.is_dir() {
+        let dbstudio = path.join(".dbstudio");
+        if dbstudio.exists() {
+            let metadata = fs::symlink_metadata(&dbstudio)
+                .map_err(|error| format!("Could not inspect {}: {error}", dbstudio.display()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!("Refusing to use unsafe workspace data path: {}", dbstudio.display()));
+            }
+        }
+        let legacy_viewdb = path.join(".viewdb").join("sql-erd.json");
+        let legacy_root = path.join("workspace.sql-erd.json");
+        let legacy = if legacy_viewdb.exists() { Some(legacy_viewdb) } else { Some(legacy_root) };
+        return Ok((
+            dbstudio.join("workspace.json"),
+            legacy,
+        ));
+    }
     let parent = path.parent().ok_or_else(|| "The SQL file has no parent folder.".to_string())?;
-    Ok(parent.join("workspace.sql-erd.json"))
+    let filename = path.file_name().and_then(|value| value.to_str()).ok_or_else(|| "The SQL file has no valid filename.".to_string())?;
+    Ok((parent.join(".dbstudio").join(format!("{filename}.workspace.json")), Some(parent.join("workspace.sql-erd.json"))))
 }
 
 fn safe_save(
@@ -149,7 +170,7 @@ fn safe_save(
             .map_err(|error| format!("Could not check the current file: {error}"))?;
         if let Some(expected) = original_hash {
             if hash_source(&current) != expected {
-                return Err("The SQL file changed outside ViewDB. Reopen it before saving so those changes are not overwritten.".to_string());
+                return Err("The SQL file changed outside DBStudio. Reopen it before saving so those changes are not overwritten.".to_string());
             }
         }
         let destination = backup_path(path)?;
@@ -158,7 +179,7 @@ fn safe_save(
         backup = Some(destination);
     }
 
-    let temp_path = parent.join(format!(".viewdb-{}.tmp", uuid::Uuid::new_v4()));
+    let temp_path = parent.join(format!(".dbstudio-{}.tmp", uuid::Uuid::new_v4()));
     let write_result = (|| -> Result<(), String> {
         let mut temp = OpenOptions::new()
             .create_new(true)
@@ -206,21 +227,97 @@ fn open_document(path: String) -> Result<OpenedDocument, String> {
 
 #[tauri::command]
 fn load_workspace_metadata(path: String) -> Result<Option<String>, String> {
-    let metadata = metadata_path(Path::new(&path))?;
-    if !metadata.exists() {
+    let (metadata, legacy) = metadata_paths(Path::new(&path))?;
+    let source = if metadata.exists() {
+        metadata
+    } else if let Some(legacy) = legacy.filter(|candidate| candidate.exists()) {
+        legacy
+    } else {
         return Ok(None);
-    }
-    fs::read_to_string(&metadata)
+    };
+    fs::read_to_string(&source)
         .map(Some)
-        .map_err(|error| format!("Could not read {}: {error}", metadata.display()))
+        .map_err(|error| format!("Could not read {}: {error}", source.display()))
+}
+
+fn write_synced(path: &Path, source: &[u8]) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+    file.write_all(source)
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("Could not flush {}: {error}", path.display()))
+}
+
+fn save_metadata(path: &Path, json: &str) -> Result<(), String> {
+    let (metadata, legacy) = metadata_paths(path)?;
+    let parent = metadata.parent().ok_or_else(|| "The metadata file has no parent folder.".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    let temp = parent.join(format!(".dbstudio-{}.tmp", uuid::Uuid::new_v4()));
+    if let Err(error) = write_synced(&temp, json.as_bytes()) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temp, &metadata) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("Could not replace diagram metadata: {error}"));
+    }
+    if let Some(legacy) = legacy.filter(|candidate| candidate.exists()) {
+        fs::remove_file(&legacy).map_err(|error| format!("Could not remove legacy metadata {}: {error}", legacy.display()))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn save_workspace_metadata(path: String, json: String) -> Result<(), String> {
-    let metadata = metadata_path(Path::new(&path))?;
-    let temp = metadata.with_extension("json.tmp");
-    fs::write(&temp, json).map_err(|error| format!("Could not write diagram metadata: {error}"))?;
-    fs::rename(&temp, &metadata).map_err(|error| format!("Could not replace diagram metadata: {error}"))
+    save_metadata(Path::new(&path), &json)
+}
+
+#[tauri::command]
+fn read_workspace_data(path: String) -> Result<String, String> {
+    let path = Path::new(&path);
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("Refusing to import an unsafe workspace data path: {}", path.display()));
+    }
+    if metadata.len() > 50 * 1024 * 1024 {
+        return Err("Workspace data is larger than the 50 MB import limit.".to_string());
+    }
+    fs::read_to_string(path).map_err(|error| format!("Could not read {}: {error}", path.display()))
+}
+
+#[tauri::command]
+fn write_workspace_data(path: String, json: String) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(&json).map_err(|error| format!("Workspace data is not valid JSON: {error}"))?;
+    write_export_file(path, json)
+}
+
+#[tauri::command]
+fn write_export_file(path: String, contents: String) -> Result<(), String> {
+    let path = Path::new(&path);
+    let parent = path.parent().ok_or_else(|| "The workspace data destination has no parent folder.".to_string())?;
+    if !parent.is_dir() {
+        return Err(format!("The workspace data destination does not exist: {}", parent.display()));
+    }
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path).map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!("Refusing to replace an unsafe workspace data path: {}", path.display()));
+        }
+    }
+    let temp = parent.join(format!(".dbstudio-export-{}.tmp", uuid::Uuid::new_v4()));
+    if let Err(error) = write_synced(&temp, contents.as_bytes()) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("Could not replace {}: {error}", path.display()));
+    }
+    Ok(())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -266,14 +363,15 @@ mod tests {
             SqlDialect::Postgresql,
         )
         .unwrap_err();
-        assert!(error.contains("changed outside ViewDB"));
+        assert!(error.contains("changed outside DBStudio"));
     }
 
     #[test]
     fn metadata_uses_workspace_sidecar() {
         let directory = tempfile::tempdir().expect("temp directory");
         let sql = directory.path().join("schema.sql");
-        assert_eq!(metadata_path(&sql).unwrap(), directory.path().join("workspace.sql-erd.json"));
+        assert_eq!(metadata_paths(&sql).unwrap().0, directory.path().join(".dbstudio/schema.sql.workspace.json"));
+        assert_eq!(metadata_paths(directory.path()).unwrap().0, directory.path().join(".dbstudio/workspace.json"));
     }
 
     #[test]
@@ -306,7 +404,23 @@ CREATE TABLE `orders` (`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, `user_id` B
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_example, open_document, save_document, load_workspace_metadata, save_workspace_metadata])
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            load_example,
+            open_document,
+            save_document,
+            load_workspace_metadata,
+            save_workspace_metadata,
+            read_workspace_data,
+            write_workspace_data,
+            write_export_file,
+            workspace::open_workspace,
+            workspace::save_workspace_files,
+            migration::save_connection_secret,
+            migration::delete_connection_secret,
+            migration::introspect_database,
+        ])
         .run(tauri::generate_context!())
-        .expect("error while running ViewDB");
+        .expect("error while running DBStudio");
 }

@@ -1,56 +1,55 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { DiagramArea, DiagramNote, SchemaDocument } from "../domain/types";
-
-interface WorkspaceMetadata {
-  version: 1;
-  tables: Array<{ name: string; position: { x: number; y: number }; color: string; collapsed: boolean }>;
-  areas: DiagramArea[];
-  notes: DiagramNote[];
-}
+import type { SchemaDocument } from "../domain/types";
+import {
+  mergeWorkspaceData,
+  parseOrMigrateWorkspaceData,
+  workspaceDataFromDocument,
+  type WorkspaceDataV2,
+} from "../domain/workspaceData";
 
 function key(path: string | null): string {
+  return `dbstudio:workspace-data:${path ?? "example"}`;
+}
+
+function legacyKey(path: string | null): string {
   return `viewdb:metadata:${path ?? "example"}`;
 }
 
-export function metadataFromDocument(document: SchemaDocument): WorkspaceMetadata {
-  return {
-    version: 1,
-    tables: document.tables.map((table) => ({ name: table.name, position: table.position, color: table.color, collapsed: table.collapsed })),
-    areas: document.areas,
-    notes: document.notes,
-  };
+export function metadataFromDocument(document: SchemaDocument): WorkspaceDataV2 {
+  return workspaceDataFromDocument(document);
 }
 
-export function applyMetadata(document: SchemaDocument, metadata: WorkspaceMetadata | null): SchemaDocument {
+export function serializeMetadata(document: SchemaDocument): string {
+  return JSON.stringify(metadataFromDocument(document), null, 2);
+}
+
+export function applyMetadata(document: SchemaDocument, metadata: unknown): SchemaDocument {
   if (!metadata) return document;
-  return {
-    ...document,
-    hasSavedLayout: metadata.tables.length > 0,
-    tables: document.tables.map((table, index) => {
-      const visual = metadata.tables.find((item) => item.name.toLowerCase() === table.name.toLowerCase()) ?? metadata.tables[index];
-      return visual ? { ...table, position: visual.position, color: visual.color, collapsed: visual.collapsed } : table;
-    }),
-    areas: metadata.areas ?? [],
-    notes: metadata.notes ?? [],
-  };
+  try {
+    const parsed = parseOrMigrateWorkspaceData(document, metadata);
+    return mergeWorkspaceData(document, parsed.data, { importComments: false, invalid: parsed.issues.length }).document;
+  } catch {
+    return document;
+  }
 }
 
-export async function loadMetadata(path: string | null): Promise<WorkspaceMetadata | null> {
+export async function loadMetadata(path: string | null): Promise<unknown | null> {
   try {
     const raw = isTauri() && path
       ? await invoke<string | null>("load_workspace_metadata", { path })
-      : localStorage.getItem(key(path));
-    return raw ? JSON.parse(raw) as WorkspaceMetadata : null;
+      : localStorage.getItem(key(path)) ?? localStorage.getItem(legacyKey(path));
+    return raw ? JSON.parse(raw) as unknown : null;
   } catch {
     return null;
   }
 }
 
 export async function saveMetadata(path: string | null, document: SchemaDocument): Promise<void> {
-  const json = JSON.stringify(metadataFromDocument(document), null, 2);
+  const json = serializeMetadata(document);
   if (isTauri() && path) {
     await invoke("save_workspace_metadata", { path, json });
   } else {
     localStorage.setItem(key(path), json);
+    localStorage.removeItem(legacyKey(path));
   }
 }

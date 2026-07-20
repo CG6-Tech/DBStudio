@@ -38,6 +38,22 @@ describe("parseSchema", () => {
     expect(document.tables[1].indexes[0].columnIds).toEqual([document.tables[1].columns[1].id]);
   });
 
+  it("parses, updates, adds, and removes table comments", () => {
+    const source = `CREATE TABLE public.users (id INT);\nCOMMENT ON TABLE public.users IS 'Application users';`;
+    const parsed = parseSchema(source);
+    expect(parsed.tables[0].comment).toBe("Application users");
+
+    parsed.tables[0].comment = "Customer's account";
+    expect(generateSql(parsed)).toContain("COMMENT ON TABLE public.users IS 'Customer''s account';");
+
+    parsed.tables[0].comment = "";
+    expect(generateSql(parsed)).not.toContain("COMMENT ON TABLE");
+
+    const withoutComment = parseSchema("CREATE TABLE orders (id INT);");
+    withoutComment.tables[0].comment = "Purchase records";
+    expect(generateSql(withoutComment)).toContain("COMMENT ON TABLE orders IS 'Purchase records';");
+  });
+
   it("patches names, types and nullability while preserving unrelated text", () => {
     const document = parseSchema(sql);
     document.tables[0].name = "customers";

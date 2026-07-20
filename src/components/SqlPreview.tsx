@@ -1,3 +1,5 @@
+import { SqlText } from "./ui/SqlText";
+
 interface SqlPreviewProps {
   open: boolean;
   sql: string;
@@ -13,7 +15,7 @@ export function SqlPreview({ open, sql, changes, onClose }: SqlPreviewProps) {
         <div><span className="live-dot" /><strong>Generated SQL</strong><small>{changes} pending {changes === 1 ? "change" : "changes"}</small></div>
         <button aria-label="Close SQL preview" onClick={onClose}>×</button>
       </header>
-      <pre><code>{sql}</code></pre>
+      <SqlText sql={sql} />
     </section>
   );
 }

@@ -1,5 +1,6 @@
 import { clusterTables, type LayoutCluster } from "../domain/clustering";
 import type { LayoutNode, LayoutResult, SchemaDocument } from "../domain/types";
+import { tableHeight, tableWidth } from "../domain/tableGeometry";
 
 export interface ClusterLayout {
   cluster: LayoutCluster;
@@ -13,37 +14,31 @@ export interface PackedCluster extends ClusterLayout {
   y: number;
 }
 
-const CARD_WIDTH = 260;
 const COLUMN_GAP = 80;
 const ROW_GAP = 80;
 const CLUSTER_GAP = 220;
 const CLUSTER_PADDING = 70;
 
-function tableHeight(document: SchemaDocument, tableId: string): number {
-  const table = document.tables.find((item) => item.id === tableId);
-  return 58 + (table?.columns.length ?? 0) * 34;
-}
-
 export function compactClusterLayout(document: SchemaDocument, cluster: LayoutCluster): ClusterLayout {
   const columns = Math.max(1, Math.ceil(Math.sqrt(cluster.tableIds.length)));
   const columnHeights = Array.from({ length: columns }, () => CLUSTER_PADDING);
-  const nodes = cluster.tableIds.map((id) => {
-    const height = tableHeight(document, id);
+  const columnWidths = Array.from({ length: columns }, () => 0);
+  const placements = cluster.tableIds.map((id) => {
+    const table = document.tables.find((item) => item.id === id)!;
+    const width = tableWidth(table);
+    const height = tableHeight(table);
     const column = columnHeights.indexOf(Math.min(...columnHeights));
-    const node = {
-      id,
-      x: CLUSTER_PADDING + column * (CARD_WIDTH + COLUMN_GAP),
-      y: columnHeights[column],
-      width: CARD_WIDTH,
-      height,
-    };
+    const y = columnHeights[column];
+    columnWidths[column] = Math.max(columnWidths[column], width);
     columnHeights[column] += height + ROW_GAP;
-    return node;
+    return { id, column, y, width, height };
   });
+  const columnOffsets = columnWidths.map((_width, column) => CLUSTER_PADDING + columnWidths.slice(0, column).reduce((sum, value) => sum + value + COLUMN_GAP, 0));
+  const nodes = placements.map(({ column, ...node }) => ({ ...node, x: columnOffsets[column] }));
   return {
     cluster,
     nodes,
-    width: CLUSTER_PADDING * 2 + columns * CARD_WIDTH + Math.max(0, columns - 1) * COLUMN_GAP,
+    width: CLUSTER_PADDING * 2 + columnWidths.reduce((sum, value) => sum + value, 0) + Math.max(0, columns - 1) * COLUMN_GAP,
     height: Math.max(...columnHeights, CLUSTER_PADDING * 2) - ROW_GAP + CLUSTER_PADDING,
   };
 }
@@ -72,7 +67,7 @@ export function packClusters(layouts: ClusterLayout[], aspectRatio = 1.6): Packe
 export function clusteredGridLayout(document: SchemaDocument): LayoutResult {
   if (document.hasSavedLayout) {
     return {
-      nodes: document.tables.map((table) => ({ id: table.id, x: table.position.x, y: table.position.y, width: CARD_WIDTH, height: tableHeight(document, table.id) })),
+      nodes: document.tables.map((table) => ({ id: table.id, x: table.position.x, y: table.position.y, width: tableWidth(table), height: tableHeight(table) })),
       edges: [],
     };
   }

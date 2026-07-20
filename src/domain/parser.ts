@@ -1,6 +1,7 @@
 import { dialectSettings, parseFieldType } from "../dialects";
 import { buildSchemaIndex, findIndexedColumn, findIndexedTable } from "./schemaIndex";
 import type { CheckConstraint, Column, CompositeCustomType, CustomType, Diagnostic, DomainCustomType, EnumCustomType, PostgresIndexMethod, Relationship, SchemaDocument, SourceRange, SqlDialect, Table, TableIndex } from "./types";
+import { parseDatabaseLogic } from "./logicParser";
 
 interface Token extends SourceRange {
   text: string;
@@ -12,6 +13,10 @@ function unquoteIdentifier(value: string): string {
   if (value.startsWith('"')) return value.slice(1, -1).replaceAll('""', '"');
   if (value.startsWith("`")) return value.slice(1, -1).replaceAll("``", "`");
   return value;
+}
+
+function unquoteString(value: string): string {
+  return value.startsWith("'") ? value.slice(1, -1).replaceAll("''", "'") : value;
 }
 
 function stablePart(value: string): string {
@@ -493,6 +498,23 @@ export function parseSchema(source: string, dialect: SqlDialect = "postgresql"):
       table.indexes.push(parsedIndex);
       cursor = endIndex;
     }
+
+    for (let cursor = 0; cursor < tokens.length - 5; cursor += 1) {
+      if (tokens[cursor].upper !== "COMMENT" || tokens[cursor + 1]?.upper !== "ON" || tokens[cursor + 2]?.upper !== "TABLE") continue;
+      const target = qualifiedNameAt(tokens, cursor + 3);
+      if (!target) continue;
+      const endIndex = statementEnd(tokens, target.next);
+      const isIndex = findTokenIndex(tokens, target.next, (token) => token.upper === "IS", endIndex);
+      const valueToken = isIndex >= 0 ? tokens[isIndex + 1] : undefined;
+      const table = findIndexedTable(schemaIndex, target.name, target.schema);
+      if (!table || !valueToken || (valueToken.kind !== "string" && valueToken.upper !== "NULL")) continue;
+      const comment = valueToken.kind === "string" ? unquoteString(valueToken.text) : undefined;
+      table.comment = comment;
+      table.originalComment = comment;
+      table.commentStatementRange = { start: tokens[cursor].start, end: tokens[endIndex].end };
+      table.commentValueRange = { start: valueToken.start, end: valueToken.end };
+      cursor = endIndex;
+    }
   }
 
   const relationships: Relationship[] = [];
@@ -517,6 +539,7 @@ export function parseSchema(source: string, dialect: SqlDialect = "postgresql"):
     }
   });
 
+  const logic = parseDatabaseLogic(source, dialect, tables);
   return {
     dialect,
     hasSavedLayout: false,
@@ -527,6 +550,7 @@ export function parseSchema(source: string, dialect: SqlDialect = "postgresql"):
     areas: [],
     notes: [],
     customTypes,
+    ...logic,
     structuralTableIds: [],
     removedStatementRanges: [],
   };

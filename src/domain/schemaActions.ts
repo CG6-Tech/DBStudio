@@ -1,6 +1,7 @@
 import { formatFieldType, parseFieldType } from "../dialects";
 import { applyEditorDiagnostics } from "./editorDiagnostics";
 import { customTypeDependentClosure, customTypeUsageLabels, schemaIndexFor } from "./schemaIndex";
+import { cardinalityChangeIssue, isManagedCardinalityIndex, managedCardinalityIndex, sourceHasUniqueKey, type RelationshipCardinality } from "./relationshipCardinality";
 import type { CheckConstraint, Column, CompositeTypeField, CustomType, DiagramArea, DiagramNote, FieldTypeSpec, PostgresIndexMethod, Relationship, SchemaDocument, Table, TableIndex } from "./types";
 
 const palette = ["#7ee0b5", "#7fb1ff", "#bc78f0", "#ff6584", "#f4c95d", "#52d5c8"];
@@ -50,6 +51,7 @@ export function addTable(document: SchemaDocument): SchemaDocument {
     position: { x: 120 + document.tables.length * 34, y: 120 + document.tables.length * 26 },
     color: palette[document.tables.length % palette.length],
     collapsed: false,
+    widthScale: 1,
     isNew: true,
   };
   return { ...document, tables: [...document.tables, table], structuralTableIds: [...document.structuralTableIds, tableId] };
@@ -291,7 +293,7 @@ export const postgresIndexMethods: PostgresIndexMethod[] = ["btree", "hash", "gi
 export function updateTable(
   document: SchemaDocument,
   tableId: string,
-  patch: Partial<Pick<Table, "name" | "color" | "collapsed" | "position">>,
+  patch: Partial<Pick<Table, "name" | "color" | "collapsed" | "position" | "widthScale" | "comment" | "commentVisible" | "commentOffset" | "commentColor">>,
 ): SchemaDocument {
   const next = replaceTable(document, tableId, (table) => ({ ...table, ...patch }));
   if (!next) return document;
@@ -326,7 +328,62 @@ export function addRelationship(
 export function deleteRelationship(document: SchemaDocument, relationshipId: string): SchemaDocument {
   const relationship = schemaIndexFor(document).relationshipById.get(relationshipId);
   if (!relationship) return document;
-  return structural(document, { ...document, relationships: document.relationships.filter((item) => item.id !== relationshipId) }, relationship.sourceTableId);
+  const removedManagedIndexes = schemaIndexFor(document).tableById.get(relationship.sourceTableId)?.indexes
+    .filter((index) => isManagedCardinalityIndex(index, relationship.sourceColumnId) && index.sourceRange)
+    .map((index) => index.sourceRange!) ?? [];
+  const next = replaceTable(document, relationship.sourceTableId, (table) => ({
+    ...table,
+    indexes: table.indexes.filter((index) => !isManagedCardinalityIndex(index, relationship.sourceColumnId)),
+  })) ?? document;
+  return structural(document, {
+    ...next,
+    relationships: document.relationships.filter((item) => item.id !== relationshipId),
+    removedStatementRanges: [...next.removedStatementRanges, ...removedManagedIndexes],
+  }, relationship.sourceTableId);
+}
+
+export function updateRelationship(
+  document: SchemaDocument,
+  relationshipId: string,
+  patch: Pick<Relationship, "sourceTableId" | "sourceColumnId" | "targetTableId" | "targetColumnId">,
+): SchemaDocument {
+  const current = schemaIndexFor(document).relationshipById.get(relationshipId);
+  if (!current) return document;
+  const next = { ...document, relationships: document.relationships.map((relationship) => relationship.id === relationshipId ? { ...relationship, ...patch } : relationship) };
+  const withOldSource = structural(document, next, current.sourceTableId);
+  return patch.sourceTableId === current.sourceTableId ? withOldSource : structural(document, withOldSource, patch.sourceTableId);
+}
+
+export function updateRelationshipWithCardinality(
+  document: SchemaDocument,
+  relationshipId: string,
+  patch: Pick<Relationship, "sourceTableId" | "sourceColumnId" | "targetTableId" | "targetColumnId">,
+  cardinality: RelationshipCardinality,
+): SchemaDocument {
+  const current = schemaIndexFor(document).relationshipById.get(relationshipId);
+  if (!current || cardinalityChangeIssue(document, patch.sourceTableId, patch.sourceColumnId, cardinality)) return document;
+  const sourceChanged = current.sourceTableId !== patch.sourceTableId || current.sourceColumnId !== patch.sourceColumnId;
+  const removedManagedIndexes = document.tables
+    .filter((table) => table.id === current.sourceTableId && (sourceChanged || cardinality === "N:1"))
+    .flatMap((table) => table.indexes.filter((index) => isManagedCardinalityIndex(index, current.sourceColumnId) && index.sourceRange).map((index) => index.sourceRange!));
+  const tables = document.tables.map((table) => {
+    let indexes = table.indexes;
+    if (table.id === current.sourceTableId && (sourceChanged || cardinality === "N:1")) {
+      indexes = indexes.filter((index) => !isManagedCardinalityIndex(index, current.sourceColumnId));
+    }
+    if (table.id === patch.sourceTableId && cardinality === "1:1") {
+      const tableWithRemovals = indexes === table.indexes ? table : { ...table, indexes };
+      if (!sourceHasUniqueKey(tableWithRemovals, patch.sourceColumnId)) {
+        indexes = [...indexes, managedCardinalityIndex(table, patch.sourceColumnId, document.dialect)];
+      }
+    }
+    return indexes === table.indexes ? table : { ...table, indexes };
+  });
+  const relationships = document.relationships.map((relationship) => relationship.id === relationshipId ? { ...relationship, ...patch } : relationship);
+  let next = { ...document, tables, relationships, removedStatementRanges: [...document.removedStatementRanges, ...removedManagedIndexes] };
+  next = structural(document, next, current.sourceTableId);
+  if (patch.sourceTableId !== current.sourceTableId) next = structural(document, next, patch.sourceTableId);
+  return next;
 }
 
 export function addArea(document: SchemaDocument): SchemaDocument {
@@ -339,6 +396,7 @@ export function addArea(document: SchemaDocument): SchemaDocument {
     width: 620,
     height: 380,
     tableIds: [],
+    noteIds: [],
     locked: false,
     collapsed: false,
     moveContents: true,
@@ -370,7 +428,7 @@ export function updateNote(document: SchemaDocument, noteId: string, patch: Part
 }
 
 export function deleteNote(document: SchemaDocument, noteId: string): SchemaDocument {
-  return { ...document, notes: document.notes.filter((note) => note.id !== noteId) };
+  return { ...document, notes: document.notes.filter((note) => note.id !== noteId), areas: document.areas.map((area) => ({ ...area, noteIds: (area.noteIds ?? []).filter((id) => id !== noteId) })) };
 }
 
 export function assignTableToArea(document: SchemaDocument, tableId: string, areaId: string | null): SchemaDocument {
@@ -381,6 +439,18 @@ export function assignTableToArea(document: SchemaDocument, tableId: string, are
       tableIds: area.id === areaId
         ? Array.from(new Set([...area.tableIds, tableId]))
         : area.tableIds.filter((id) => id !== tableId),
+    })),
+  };
+}
+
+export function assignNoteToArea(document: SchemaDocument, noteId: string, areaId: string | null): SchemaDocument {
+  return {
+    ...document,
+    areas: document.areas.map((area) => ({
+      ...area,
+      noteIds: area.id === areaId
+        ? Array.from(new Set([...(area.noteIds ?? []), noteId]))
+        : (area.noteIds ?? []).filter((id) => id !== noteId),
     })),
   };
 }

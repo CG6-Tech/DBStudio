@@ -1,4 +1,4 @@
-# ViewDB
+# DBStudio
 
 A minimal, source-preserving PostgreSQL ER editor built with the production stack: Tauri 2, Rust, React, TypeScript, PixiJS 8, RBush, ELK.js, Zustand, and `libpg_query` through the Rust `pg_query` crate.
 
@@ -40,5 +40,5 @@ cd src-tauri && cargo test
 - Create, move, resize, recolor, lock, and delete grouping areas.
 - Drop tables into an area; moving the area can move its grouped tables.
 - Add colored canvas notes.
-- Persist canvas metadata in `workspace.sql-erd.json` beside the SQL file.
+- Persist portable canvas data in `.dbstudio/workspace.json`, with automatic migration from older metadata files.
 - Preview generated SQL and save with parser validation, external-change protection, backups, and atomic replacement.

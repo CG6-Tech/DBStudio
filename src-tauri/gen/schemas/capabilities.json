@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default desktop permissions for ViewDB","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open","dialog:allow-save"]}}
+{"default":{"identifier":"default","description":"Default desktop permissions for DBStudio","local":true,"windows":["main"],"permissions":["core:default","dialog:allow-open","dialog:allow-save","process:allow-exit","process:allow-restart","updater:allow-check","updater:allow-download-and-install"]}}

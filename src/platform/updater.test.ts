@@ -1,6 +1,6 @@
 import type { DownloadEvent } from "@tauri-apps/plugin-updater";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { checkForAppUpdate, discardPendingUpdate, installPendingUpdate, type UpdaterBoundary } from "./updater";
+import { checkForAppUpdate, discardPendingUpdate, explainUpdateError, installPendingUpdate, type UpdaterBoundary } from "./updater";
 
 function fakeBoundary(rawJson: Record<string, unknown> = {}): { boundary: UpdaterBoundary; close: ReturnType<typeof vi.fn>; download: ReturnType<typeof vi.fn>; relaunch: ReturnType<typeof vi.fn> } {
   const close = vi.fn(async () => undefined);
@@ -44,5 +44,9 @@ describe("native updater adapter", () => {
     expect(download).toHaveBeenCalledOnce();
     expect(progress).toHaveBeenLastCalledWith({ downloaded: 100, total: 100, percent: 100 });
     expect(relaunch).toHaveBeenCalledOnce();
+  });
+
+  it("explains release endpoint setup failures", () => {
+    expect(explainUpdateError(new Error("Could not fetch a valid release JSON from the remote"))).toMatch(/Beta updates are not published yet/);
   });
 });

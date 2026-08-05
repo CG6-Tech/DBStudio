@@ -14,7 +14,6 @@ import {
   Files,
   FolderOpen,
   GitBranch,
-  GitFork,
   KeyRound,
   Laptop,
   LayoutDashboard,
@@ -23,6 +22,7 @@ import {
   RefreshCw,
   Save,
   ShieldCheck,
+  MessageSquareText,
   Sparkles,
   Split,
   Table2,
@@ -32,15 +32,28 @@ import {
   X,
 } from "lucide-react";
 import { BrandLogo } from "../components/BrandLogo";
+import { betaExpiryLabel } from "../platform/betaExpiry";
 import "./marketing.css";
+
+const CTA_EMAIL = "dbstudio@cg6.tech";
+const CTA_MAILTO = `mailto:${CTA_EMAIL}?subject=DBStudio%20beta%20access`;
+const HERO_SCREENSHOT_SRC = "/dbstudio-app.png?v=2026-07-21-installed-sample";
+
+const DOWNLOAD_LINKS = {
+  macAppleSilicon:
+    "https://firebasestorage.googleapis.com/v0/b/cg6-tech.firebasestorage.app/o/DBStudio_0.1.0-beta.1_aarch64.dmg?alt=media&token=163fe4e1-3106-4170-adc0-7479cad45431",
+  macIntel:
+    "https://firebasestorage.googleapis.com/v0/b/cg6-tech.firebasestorage.app/o/DBStudio_0.1.0-beta.1_x64.dmg?alt=media&token=1cb94a18-e41d-480f-9752-a7d352b623b2",
+  linuxDeb:
+    "https://firebasestorage.googleapis.com/v0/b/cg6-tech.firebasestorage.app/o/DBStudio_0.1.0-beta.1_amd64.deb?alt=media&token=23a7876e-3a7b-4557-81ff-86c53e0c0f8a",
+};
 
 const SITE_LINKS = {
   download: "#download",
-  github: "",
   releases: "#download",
   documentation: "#faq",
   privacy: "#security",
-  feedback: "mailto:feedback@dbstudio.dev",
+  feedback: `mailto:${CTA_EMAIL}?subject=DBStudio%20beta%20feedback`,
 };
 
 const features = [
@@ -70,21 +83,28 @@ const faqs = [
   ["Which databases are supported?", "The current beta supports PostgreSQL and MySQL schema workflows."],
   [
     "Can I use DBStudio without an account?",
-    "Yes. Core local editing, preview, migration planning, import, export, and saving are available without signing in.",
+    "Yes. Core local editing, preview, migration planning, import, export, and saving are available without signing in. Sign-in is optional for beta identity and feedback workflows.",
   ],
   [
     "Does DBStudio execute migrations automatically?",
     "No. DBStudio helps you compare, review, resolve, and export migration SQL. You remain responsible for reviewing and applying it through your normal deployment process.",
   ],
-  ["Which operating systems are supported?", "The cross-platform beta is planned for macOS, Windows, and Linux."],
+  ["Which operating systems are supported?", "The current beta is available for macOS Apple Silicon, macOS Intel, and Linux DEB. Windows builds are planned next."],
 ] as const;
 
-function ActionLink({ href, className, children }: { href: string; className: string; children: ReactNode }) {
-  if (!href) {
-    return <span className={`${className} is-disabled`} aria-disabled="true" title="Repository link coming with the beta release">{children}</span>;
-  }
-  return <a href={href} className={className}>{children}</a>;
-}
+const limitations = [
+  "PostgreSQL and MySQL schema SQL only in this beta.",
+  "Generated SQL must be reviewed before applying it to a database.",
+  "DBStudio does not modify production databases automatically.",
+  "Early beta updates may be shared manually before the update service is fully published.",
+  `This beta build runs until ${betaExpiryLabel()}.`,
+] as const;
+
+const platformCards = [
+  [Laptop, "macOS", "Apple Silicon + Intel", "Available now"],
+  [Blocks, "Windows", "Windows 10 and later", "Coming soon"],
+  [TerminalSquare, "Linux", "DEB package", "Experimental"],
+] as const;
 
 function Status({ kind, children }: { kind: "safe" | "review" | "blocked" | "logic"; children: ReactNode }) {
   const icon = kind === "safe" ? <Check size={11} /> : kind === "blocked" ? <AlertTriangle size={11} /> : <CircleDot size={11} />;
@@ -205,7 +225,7 @@ export function MarketingPage() {
           <a href="#features" onClick={() => setMenuOpen(false)}>Features</a>
           <a href="#migrations" onClick={() => setMenuOpen(false)}>Migrations</a>
           <a href="#security" onClick={() => setMenuOpen(false)}>Security</a>
-          <ActionLink href={SITE_LINKS.github} className="nav-github"><GitFork size={15} /> GitHub</ActionLink>
+          <a href={SITE_LINKS.feedback} onClick={() => setMenuOpen(false)}>Feedback</a>
           <a href={SITE_LINKS.download} className="nav-download" onClick={() => setMenuOpen(false)}>Download Beta <ArrowDown size={14} /></a>
         </nav>
       </header>
@@ -219,14 +239,14 @@ export function MarketingPage() {
             <p>Explore schemas visually, understand the logic behind them, and plan safer migrations—without giving up control of your SQL.</p>
             <div className="hero-actions">
               <a href={SITE_LINKS.download} className="button primary"><Download size={17} /> Download Beta</a>
-              <ActionLink href={SITE_LINKS.github} className="button secondary"><GitFork size={17} /> View on GitHub</ActionLink>
+              <a href={SITE_LINKS.feedback} className="button secondary">Contact {CTA_EMAIL}</a>
             </div>
-            <div className="platform-note"><Laptop size={15} /><span>Available for macOS, Windows, and Linux</span></div>
+            <div className="platform-note"><Laptop size={15} /><span>macOS Apple Silicon + Intel available now · Linux DEB experimental</span></div>
           </div>
           <div className="hero-product reveal delay-one">
             <div className="product-window">
               <div className="window-bar"><div><i /><i /><i /></div><span>DBStudio · commerce-schema</span><b>PostgreSQL</b></div>
-              <img src="/dbstudio-app.png" alt="DBStudio showing a PostgreSQL schema with connected tables on a visual canvas" />
+              <img src={HERO_SCREENSHOT_SRC} alt="DBStudio showing a PostgreSQL schema with connected tables on a visual canvas" />
             </div>
             <div className="floating-tag tag-local"><ShieldCheck size={13} /> Local-first</div>
             <div className="floating-tag tag-source"><FileCode2 size={13} /> Source-preserving</div>
@@ -309,15 +329,30 @@ export function MarketingPage() {
 
         <section className="section security" id="security">
           <div className="security-visual" aria-hidden="true">
-            <div className="shield-ring outer"><span /></div><div className="shield-ring middle"><span /></div>
-            <div className="security-core"><ShieldCheck size={35} /><strong>LOCAL</strong><small>YOUR MACHINE</small></div>
-            <span className="security-orbit orbit-one"><FileCode2 size={15} /></span><span className="security-orbit orbit-two"><Database size={15} /></span><span className="security-orbit orbit-three"><KeyRound size={15} /></span>
+            <div className="security-orbit-system">
+              <div className="shield-ring outer"><span /></div>
+              <div className="shield-ring middle"><span /></div>
+              <div className="shield-ring inner"><span /></div>
+              <div className="security-core"><ShieldCheck size={35} /><strong>LOCAL</strong><small>YOUR MACHINE</small></div>
+              <div className="security-feature orbit-feature-one"><FileCode2 size={15} /><span>Local SQL files</span></div>
+              <div className="security-feature orbit-feature-two"><LockKeyhole size={15} /><span>No sign-in</span></div>
+              <div className="security-feature orbit-feature-three"><Check size={15} /><span>Validated saves</span></div>
+              <div className="security-feature orbit-feature-four"><Save size={15} /><span>Backup protection</span></div>
+              <div className="security-feature orbit-feature-five"><MessageSquareText size={15} /><span>Optional feedback</span></div>
+            </div>
           </div>
           <div className="security-copy">
-            <span className="eyebrow">Local by default</span>
-            <h2>Your schema stays<br />under your control.</h2>
-            <p>DBStudio works with local SQL projects and does not require an account for core editing workflows. Native saves use validation and guarded file replacement to reduce accidental damage.</p>
-            <div className="proof-grid"><span><Check /> No account required</span><span><Check /> SQL stays on your machine</span><span><Check /> Parser validation before saves</span><span><Check /> Backup and change protection</span></div>
+            <span className="eyebrow">Local-first by design</span>
+            <h2>Your schema stays<br />on your machine.</h2>
+            <p>DBStudio is built for local SQL workspaces. You can inspect, arrange, edit, preview, and save without signing in or connecting a production database.</p>
+            <div className="proof-grid">
+              <span><Check /> No sign-in required for local work</span>
+              <span><Check /> SQL files stay on your machine</span>
+              <span><Check /> Parser validation before writes</span>
+              <span><Check /> Backup and change protection</span>
+              <span><Check /> Feedback is optional</span>
+              <span><Check /> Beta expiry is transparent</span>
+            </div>
           </div>
         </section>
 
@@ -325,14 +360,38 @@ export function MarketingPage() {
           <div className="download-glow" aria-hidden="true" />
           <span className="beta-label">DBSTUDIO BETA</span>
           <h2>Bring clarity to your<br />next schema change.</h2>
-          <p>Download DBStudio for your platform and start with an existing PostgreSQL or MySQL workspace.</p>
+          <p>Download the beta and start with an existing PostgreSQL or MySQL workspace. Core local use does not require an account.</p>
           <div className="platform-cards">
-            <article><Laptop size={22} /><div><strong>macOS</strong><span>Apple Silicon + Intel</span></div><small>Coming with beta</small></article>
-            <article><Blocks size={22} /><div><strong>Windows</strong><span>Windows 10 and later</span></div><small>Coming with beta</small></article>
-            <article><TerminalSquare size={22} /><div><strong>Linux</strong><span>AppImage + DEB</span></div><small>Coming with beta</small></article>
+            {platformCards.map(([Icon, platform, detail, status]) => (
+              <article key={platform} className={status === "Available now" ? "available" : status === "Experimental" ? "experimental" : undefined}>
+                <Icon size={22} />
+                <div><strong>{platform}</strong><span>{detail}</span></div>
+                <small>{status}</small>
+              </article>
+            ))}
+          </div>
+          <div className="release-strip">
+            <span><ShieldCheck size={14} /> No account required for local workflows</span>
+            <span><MessageSquareText size={14} /> Feedback through the app or {CTA_EMAIL}</span>
+            <span><AlertTriangle size={14} /> Beta expires {betaExpiryLabel()}</span>
           </div>
           <div className="beta-warning"><AlertTriangle size={15} /><span>Beta software—review generated SQL before applying it to any database.</span></div>
-          <ActionLink href={SITE_LINKS.github} className="button secondary"><GitFork size={17} /> Follow the beta on GitHub</ActionLink>
+          <div className="download-actions" aria-label="DBStudio beta downloads">
+            <a href={DOWNLOAD_LINKS.macAppleSilicon} className="button primary"><Download size={17} /> Mac Apple Silicon</a>
+            <a href={DOWNLOAD_LINKS.macIntel} className="button secondary"><Download size={17} /> Mac Intel</a>
+            <a href={DOWNLOAD_LINKS.linuxDeb} className="button secondary"><TerminalSquare size={17} /> Linux .deb</a>
+          </div>
+          <a href={CTA_MAILTO} className="download-contact">Need Windows or help installing? Email {CTA_EMAIL}</a>
+        </section>
+
+        <section className="section known-limitations">
+          <div className="section-heading horizontal">
+            <div><span className="eyebrow">Beta expectations</span><h2>Known limits before you install.</h2></div>
+            <p>DBStudio is useful today, but the beta should be treated as review-first tooling for local SQL projects.</p>
+          </div>
+          <div className="limitations-grid">
+            {limitations.map((item) => <article key={item}><AlertTriangle size={15} /><span>{item}</span></article>)}
+          </div>
         </section>
 
         <section className="section faq" id="faq">
@@ -345,7 +404,7 @@ export function MarketingPage() {
 
       <footer className="marketing-footer">
         <div><a className="marketing-brand" href="#top"><BrandLogo /><strong>DBStudio</strong></a><p>A visual workspace for understanding and evolving SQL databases.</p></div>
-        <nav aria-label="Footer navigation"><ActionLink href={SITE_LINKS.github} className="footer-link">GitHub</ActionLink><a href={SITE_LINKS.documentation}>Documentation</a><a href={SITE_LINKS.releases}>Releases</a><a href={SITE_LINKS.privacy}>Privacy</a><a href={SITE_LINKS.feedback}>Feedback</a></nav>
+        <nav aria-label="Footer navigation"><a href={SITE_LINKS.download}>Download beta</a><a href={SITE_LINKS.documentation}>Documentation</a><a href={SITE_LINKS.releases}>Releases</a><a href={SITE_LINKS.privacy}>Privacy</a><a href={SITE_LINKS.feedback}>Feedback</a></nav>
         <span>© 2026 DBStudio</span>
       </footer>
     </div>

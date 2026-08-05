@@ -1587,11 +1587,13 @@ export function DiagramCanvas({ document, layout, onReplace, highlightedTableIds
     lastFitRequest.current = fitRequest;
     lastFittedLayoutGenerationRef.current = layoutGeneration;
     const { minX, minY, maxX, maxY } = workspaceBoundsRef.current;
-    const scale = scaleToFit(app.screen.width, app.screen.height, { minX, minY, maxX, maxY });
+    const toolbarSafeArea = 68;
+    const availableHeight = Math.max(1, app.screen.height - toolbarSafeArea);
+    const scale = scaleToFit(app.screen.width, availableHeight, { minX, minY, maxX, maxY });
     const viewport = viewportRef.current;
     viewport.scale = scale;
     viewport.x = (app.screen.width - (maxX - minX) * scale) / 2 - minX * scale;
-    viewport.y = (app.screen.height - (maxY - minY) * scale) / 2 - minY * scale;
+    viewport.y = toolbarSafeArea + (availableHeight - (maxY - minY) * scale) / 2 - minY * scale;
     syncViewportRef.current();
     refreshViewportCullingRef.current();
   }, [fitRequest, rendererReady, layout.generation]);

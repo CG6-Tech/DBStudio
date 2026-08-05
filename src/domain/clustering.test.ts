@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clusterTables } from "./clustering";
+import { clusterTables, communitySizeRange } from "./clustering";
 import { parseSchema } from "./parser";
 
 function chainSql(count: number): string {
@@ -19,9 +19,34 @@ describe("clusterTables", () => {
     const document = parseSchema(chainSql(47));
     const first = clusterTables(document).filter((cluster) => cluster.kind === "community");
     const reordered = clusterTables({ ...document, tables: [...document.tables].reverse(), relationships: [...document.relationships].reverse() }).filter((cluster) => cluster.kind === "community");
-    expect(first.map((cluster) => cluster.tableIds.length)).toEqual([16, 16, 15]);
+    expect(first.map((cluster) => cluster.tableIds.length)).toEqual([10, 20, 17]);
+    expect(first.every((cluster) => cluster.tableIds.length >= communitySizeRange.min && cluster.tableIds.length <= communitySizeRange.max)).toBe(true);
     expect(reordered).toEqual(first);
     expect(new Set(first.flatMap((cluster) => cluster.tableIds)).size).toBe(47);
+  });
+
+  it("keeps a component that already fits one cluster intact", () => {
+    const document = parseSchema(chainSql(communitySizeRange.max));
+    expect(clusterTables(document).map((cluster) => cluster.tableIds.length)).toEqual([communitySizeRange.max]);
+  });
+
+  it("cuts a two-hub schema at the bridge instead of at a table count", () => {
+    // Two dense hubs joined by a single foreign key: the split must fall on that
+    // one link, not wherever a size cap happens to land.
+    const table = (name: string, references: string[]) =>
+      `CREATE TABLE ${name} (id INT PRIMARY KEY${references.map((target, index) => `, ref_${index} INT REFERENCES ${target}(id)`).join("")});`;
+    const statements = ["CREATE TABLE hub_a (id INT PRIMARY KEY);", "CREATE TABLE hub_b (id INT PRIMARY KEY);"];
+    for (let index = 0; index < 11; index += 1) statements.push(table(`a_${index}`, ["hub_a"]));
+    for (let index = 0; index < 11; index += 1) statements.push(table(`b_${index}`, ["hub_b"]));
+    statements.push(table("bridge", ["hub_a", "hub_b"]));
+
+    const document = parseSchema(statements.join("\n"));
+    const clusters = clusterTables(document);
+    const clusterOf = new Map(clusters.flatMap((cluster) => cluster.tableIds.map((id) => [id, cluster.id] as const)));
+    const cut = document.relationships.filter((relationship) => clusterOf.get(relationship.sourceTableId) !== clusterOf.get(relationship.targetTableId));
+
+    expect(clusters).toHaveLength(2);
+    expect(cut).toHaveLength(1);
   });
 
   it("packs unrelated tables into bounded fallback groups", () => {

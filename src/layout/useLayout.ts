@@ -4,6 +4,7 @@ import { clusteredGridLayout } from "./clusterPacking";
 import { reconcileLayout } from "./reconcileLayout";
 
 const fallback = (document: SchemaDocument): LayoutResult => clusteredGridLayout(document);
+const FIRST_PAINT_GRACE_MS = 150;
 
 export function useLayout(document: SchemaDocument | null, autoLayoutRequest = 0, layoutRevision = 0): LayoutResult | null {
   const [layout, setLayout] = useState<LayoutResult | null>(null);
@@ -15,7 +16,9 @@ export function useLayout(document: SchemaDocument | null, autoLayoutRequest = 0
   const workerRef = useRef<Worker | null>(null);
   const workerMessageRef = useRef<(event: MessageEvent<LayoutResult>) => void>(() => undefined);
   const workerErrorRef = useRef<() => void>(() => undefined);
+  const layoutRef = useRef<LayoutResult | null>(layout);
   documentRef.current = document;
+  layoutRef.current = layout;
 
   const layoutSignature = useMemo(() => document ? JSON.stringify([
     document.hasSavedLayout,
@@ -58,24 +61,42 @@ export function useLayout(document: SchemaDocument | null, autoLayoutRequest = 0
       pendingTablesRef.current = null;
       setLayout({ ...next, kind: "initial", generation: ++layoutGenerationRef.current });
     };
-    publishInitialLayout(fallback(document));
     const worker = workerRef.current;
-    if (!worker) return;
-    pendingTablesRef.current = document.tables;
+    if (!worker) {
+      publishInitialLayout(fallback(document));
+      return;
+    }
+    // The synchronous fallback ignores relationships, so painting it first made
+    // every load flash a bin-packed grid before snapping to the real layout.
+    // Hold it back briefly and let the worker win whenever it can.
+    const graceTimer = window.setTimeout(() => publishInitialLayout(fallback(document)), FIRST_PAINT_GRACE_MS);
     workerMessageRef.current = (event) => {
       if (event.data.generation !== loadToken) return;
+      window.clearTimeout(graceTimer);
       publishInitialLayout(event.data);
     };
-    workerErrorRef.current = () => { if (loadToken === loadTokenRef.current) pendingTablesRef.current = null; };
+    workerErrorRef.current = () => {
+      window.clearTimeout(graceTimer);
+      publishInitialLayout(fallback(document));
+    };
     worker.postMessage({ document, mode: "initial", generation: loadToken });
+    return () => window.clearTimeout(graceTimer);
   }, [layoutSignature]);
 
   useEffect(() => {
     const currentDocument = documentRef.current;
     if (!currentDocument) return;
-    if (pendingTablesRef.current && pendingTablesRef.current !== currentDocument.tables) {
+    const abandonedLoad = Boolean(pendingTablesRef.current && pendingTablesRef.current !== currentDocument.tables);
+    if (abandonedLoad) {
       loadTokenRef.current += 1;
       pendingTablesRef.current = null;
+    }
+    // Discarding an in-flight load leaves nothing to reconcile, so on a first
+    // load the canvas would sit empty forever waiting for a result that can no
+    // longer publish.
+    if (abandonedLoad && layoutRef.current === null) {
+      setLayout({ ...fallback(currentDocument), kind: "initial", generation: ++layoutGenerationRef.current });
+      return;
     }
     setLayout((current) => current ? reconcileLayout(currentDocument, current) : current);
   }, [layoutRevision]);

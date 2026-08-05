@@ -72,6 +72,34 @@ describe("relationship geometry", () => {
     expect(fieldAnchor(node, document.tables[0], document.tables[0].columns[0].id, "right").point.x).toBe(760);
   });
 
+  it("faces the anchors toward each other when the tables are side by side", () => {
+    const document = parseSchema(sql);
+    const geometry = buildRelationshipGeometry(document, document.relationships[0], nodes(document))!;
+    expect(geometry.source.side).toBe("right");
+    expect(geometry.target.side).toBe("left");
+  });
+
+  it("routes stacked tables through the free channel beside both cards", () => {
+    const document = parseSchema(sql);
+    // Cards stacked vertically over almost the same column span. Forcing
+    // opposite sides here sent the route back across a card body; the anchors
+    // should instead leave on the same side and run in open space.
+    const stacked = new Map([
+      [document.tables[0].id, { id: document.tables[0].id, x: 100, y: 600, width: 260, height: 92 }],
+      [document.tables[1].id, { id: document.tables[1].id, x: 120, y: 100, width: 260, height: 160 }],
+    ]);
+    const geometry = buildRelationshipGeometry(document, document.relationships[0], stacked)!;
+    expect(geometry.source.side).toBe(geometry.target.side);
+
+    const clearance = 42;
+    const direction = geometry.source.side === "right" ? 1 : -1;
+    const stubs = [geometry.source.point.x + direction * clearance, geometry.target.point.x + direction * clearance];
+    const cards = [...stacked.values()];
+    stubs.forEach((stub) => cards.forEach((card) => {
+      expect(stub > card.x && stub < card.x + card.width).toBe(false);
+    }));
+  });
+
   it("rounds horizontal-to-vertical and vertical-to-horizontal elbows", () => {
     const rounded = roundedOrthogonalPath([
       { x: 0, y: 0 },

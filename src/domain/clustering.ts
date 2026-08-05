@@ -11,6 +11,8 @@ export interface LayoutCluster {
 
 const MIN_COMMUNITY_SIZE = 8;
 const MAX_COMMUNITY_SIZE = 20;
+const MODULARITY_PASSES = 12;
+const MERGE_ROUNDS = 8;
 
 function compareIds(left: string, right: string): number {
   return left.localeCompare(right);
@@ -24,100 +26,107 @@ function balancedSizes(total: number): number[] {
   return Array.from({ length: count }, (_, index) => base + (index < remainder ? 1 : 0));
 }
 
-interface Candidate {
-  id: string;
-  links: number;
-  degree: number;
-}
-
-function higherPriority(left: Candidate, right: Candidate): boolean {
-  if (left.links !== right.links) return left.links > right.links;
-  if (left.degree !== right.degree) return left.degree > right.degree;
-  return compareIds(left.id, right.id) < 0;
-}
-
-class CandidateHeap {
-  private values: Candidate[] = [];
-
-  get size(): number { return this.values.length; }
-
-  push(value: Candidate): void {
-    this.values.push(value);
-    let index = this.values.length - 1;
-    while (index > 0) {
-      const parent = (index - 1) >> 1;
-      if (higherPriority(this.values[parent], value)) break;
-      this.values[index] = this.values[parent];
-      index = parent;
-    }
-    this.values[index] = value;
-  }
-
-  pop(): Candidate | undefined {
-    const first = this.values[0];
-    const last = this.values.pop();
-    if (!first || !last || this.values.length === 0) return first;
-    let index = 0;
-    while (true) {
-      const left = index * 2 + 1;
-      const right = left + 1;
-      if (left >= this.values.length) break;
-      const child = right < this.values.length && higherPriority(this.values[right], this.values[left]) ? right : left;
-      if (higherPriority(last, this.values[child])) break;
-      this.values[index] = this.values[child];
-      index = child;
-    }
-    this.values[index] = last;
-    return first;
-  }
-}
-
-function splitComponent(component: string[], adjacency: Map<string, Set<string>>): string[][] {
-  const remaining = new Set(component);
-  const seedHeap = new CandidateHeap();
-  component.forEach((id) => seedHeap.push({ id, links: 0, degree: adjacency.get(id)?.size ?? 0 }));
-
-  const takeSeed = (): string | undefined => {
-    while (seedHeap.size > 0) {
-      const candidate = seedHeap.pop()!;
-      if (remaining.has(candidate.id)) return candidate.id;
-    }
-    return undefined;
-  };
-
-  return balancedSizes(component.length).map((targetSize) => {
-    const group: string[] = [];
-    const frontier = new CandidateHeap();
-    const linksIntoGroup = new Map<string, number>();
-
-    const add = (id: string) => {
-      if (!remaining.delete(id)) return;
-      group.push(id);
-      adjacency.get(id)?.forEach((neighbor) => {
-        if (!remaining.has(neighbor)) return;
-        const links = (linksIntoGroup.get(neighbor) ?? 0) + 1;
-        linksIntoGroup.set(neighbor, links);
-        frontier.push({ id: neighbor, links, degree: adjacency.get(neighbor)?.size ?? 0 });
-      });
-    };
-
-    const takeFrontier = (): string | undefined => {
-      while (frontier.size > 0) {
-        const candidate = frontier.pop()!;
-        if (remaining.has(candidate.id) && linksIntoGroup.get(candidate.id) === candidate.links) return candidate.id;
-      }
-      return undefined;
-    };
-
-    const seed = takeSeed();
-    if (seed) add(seed);
-    while (group.length < targetSize && remaining.size > 0) {
-      const next = takeFrontier() ?? takeSeed();
-      if (!next) break;
-      add(next);
-    }
-    return group;
+function groupByCommunity(ordered: string[], community: Map<string, string>): string[][] {
+  const groups = new Map<string, string[]>();
+  ordered.forEach((id) => {
+    const label = community.get(id)!;
+    const members = groups.get(label);
+    if (members) members.push(id);
+    else groups.set(label, [id]);
   });
+  return [...groups.values()];
+}
+
+/**
+ * Greedy modularity optimisation (the local-moving phase of Louvain). Unlike a
+ * size-capped traversal it cuts a component at its weakest links, so the
+ * relationships that survive inside a cluster are the ones ELK can actually
+ * lay out. Nodes are visited in id order so the result is reorder-invariant.
+ */
+function detectCommunities(component: string[], adjacency: Map<string, Set<string>>): string[][] {
+  const ordered = [...component].sort(compareIds);
+  const degree = new Map(ordered.map((id) => [id, adjacency.get(id)?.size ?? 0]));
+  const linkTotal = Math.max(1, ordered.reduce((sum, id) => sum + degree.get(id)!, 0) / 2);
+  const community = new Map(ordered.map((id) => [id, id]));
+  const totalDegree = new Map(ordered.map((id) => [id, degree.get(id)!]));
+  const size = new Map(ordered.map((id) => [id, 1]));
+
+  for (let pass = 0; pass < MODULARITY_PASSES; pass += 1) {
+    let moved = false;
+    ordered.forEach((id) => {
+      const own = community.get(id)!;
+      const nodeDegree = degree.get(id)!;
+      const links = new Map<string, number>();
+      adjacency.get(id)?.forEach((neighbor) => {
+        const label = community.get(neighbor);
+        if (label !== undefined) links.set(label, (links.get(label) ?? 0) + 1);
+      });
+      totalDegree.set(own, totalDegree.get(own)! - nodeDegree);
+      size.set(own, size.get(own)! - 1);
+
+      let best = own;
+      let bestGain = (links.get(own) ?? 0) - (totalDegree.get(own)! * nodeDegree) / (2 * linkTotal);
+      [...links.entries()].sort(([left], [right]) => compareIds(left, right)).forEach(([label, weight]) => {
+        if (label === own || size.get(label)! >= MAX_COMMUNITY_SIZE) return;
+        const gain = weight - (totalDegree.get(label)! * nodeDegree) / (2 * linkTotal);
+        if (gain > bestGain + 1e-9) {
+          bestGain = gain;
+          best = label;
+        }
+      });
+
+      totalDegree.set(best, totalDegree.get(best)! + nodeDegree);
+      size.set(best, size.get(best)! + 1);
+      community.set(id, best);
+      if (best !== own) moved = true;
+    });
+    if (!moved) break;
+  }
+
+  return mergeSmallCommunities(groupByCommunity(ordered, community), adjacency);
+}
+
+/**
+ * Modularity happily emits pairs and triples. Folding anything under
+ * MIN_COMMUNITY_SIZE into its strongest neighbour keeps clusters worth packing
+ * without ever crossing MAX_COMMUNITY_SIZE.
+ */
+function mergeSmallCommunities(groups: string[][], adjacency: Map<string, Set<string>>): string[][] {
+  const byLabel = new Map(groups.map((members) => [members[0], [...members]]));
+  const labelOf = new Map<string, string>();
+  byLabel.forEach((members, label) => members.forEach((id) => labelOf.set(id, label)));
+
+  const labelsBySize = () => [...byLabel.keys()]
+    .filter((label) => byLabel.get(label)!.length < MIN_COMMUNITY_SIZE)
+    .sort((left, right) => byLabel.get(left)!.length - byLabel.get(right)!.length || compareIds(left, right));
+
+  for (let round = 0; round < MERGE_ROUNDS; round += 1) {
+    const candidates = labelsBySize();
+    if (candidates.length === 0) break;
+    let merged = false;
+    candidates.forEach((label) => {
+      const members = byLabel.get(label);
+      if (!members || members.length >= MIN_COMMUNITY_SIZE) return;
+      const links = new Map<string, number>();
+      members.forEach((id) => adjacency.get(id)?.forEach((neighbor) => {
+        const other = labelOf.get(neighbor);
+        if (other && other !== label) links.set(other, (links.get(other) ?? 0) + 1);
+      }));
+      const target = [...links.entries()]
+        .filter(([other]) => byLabel.get(other)!.length + members.length <= MAX_COMMUNITY_SIZE)
+        .sort(([leftLabel, leftWeight], [rightLabel, rightWeight]) => rightWeight - leftWeight || compareIds(leftLabel, rightLabel))[0]?.[0];
+      if (!target) return;
+      byLabel.get(target)!.push(...members);
+      members.forEach((id) => labelOf.set(id, target));
+      byLabel.delete(label);
+      merged = true;
+    });
+    if (!merged) break;
+  }
+
+  return [...byLabel.values()]
+    .map((members) => members.sort(compareIds))
+    .sort((left, right) => compareIds(left[0], right[0]));
 }
 
 function connectedComponents(ids: string[], adjacency: Map<string, Set<string>>): string[][] {
@@ -170,7 +179,8 @@ export function clusterTables(document: SchemaDocument): LayoutCluster[] {
       isolated.push(component[0]);
       return;
     }
-    splitComponent(component, adjacency).forEach((members) => {
+    const groups = component.length <= MAX_COMMUNITY_SIZE ? [component] : detectCommunities(component, adjacency);
+    groups.forEach((members) => {
       clusters.push({ id: `community:${communityIndex++}:${members[0]}`, kind: "community", tableIds: members });
     });
   });

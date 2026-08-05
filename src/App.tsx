@@ -1,7 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { User } from "firebase/auth";
 import { CanvasToolbar } from "./components/CanvasToolbar";
 import { SqlPreview } from "./components/SqlPreview";
 import { Toolbar } from "./components/Toolbar";
+import { WorkspaceCommandBar } from "./components/WorkspaceCommandBar";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { DialectWorkspaceDialog } from "./components/DialectWorkspaceDialog";
 import { WorkspaceImportDialog } from "./components/WorkspaceImportDialog";
@@ -13,7 +15,8 @@ import { mergeWorkspaceData, parseWorkspaceData, type WorkspaceMergeReport } fro
 import { affectedWorkspaceFiles, assignNewEntityOwnership, generateWorkspaceSql } from "./domain/workspaceSql";
 import type { FileId, OpenedWorkspace, SqlWorkspace } from "./domain/workspaceTypes";
 import { useLayout } from "./layout/useLayout";
-import { desktopAvailable, exportTextFile, exportWorkspaceDataFile, importWorkspaceDataFile, loadDevelopmentWorkspace, loadExample, openSqlFile, openSqlWorkspace, saveSqlFile, saveSqlWorkspace } from "./platform/desktop";
+import { applyAutoLayout } from "./layout/applyAutoLayout";
+import { beginDesktopAuth, desktopAvailable, exportTextFile, exportWorkspaceDataFile, importWorkspaceDataFile, loadDevelopmentWorkspace, loadExample, openExternalUrl, openSqlFile, openSqlWorkspace, pollDesktopAuthResult, saveSqlFile, saveSqlWorkspace } from "./platform/desktop";
 import { migrationSnapshotFromDocument } from "./domain/migrationSnapshot";
 import type { MigrationSource } from "./components/MigrationPlannerPanel";
 import type { MigrationPlan, MigrationPlanDecisions } from "./domain/migrationPlanner";
@@ -21,7 +24,10 @@ import { applyMetadata, loadMetadata, saveMetadata, serializeMetadata } from "./
 import { useUiStore } from "./state/uiStore";
 import { useUpdateStore } from "./state/updateStore";
 import { UPDATE_CHECK_INTERVAL_MS, isUpdateDeferred } from "./platform/updatePolicy";
-import { checkForAppUpdate, discardPendingUpdate, exitForMandatoryUpdate, installPendingUpdate } from "./platform/updater";
+import { checkForAppUpdate, discardPendingUpdate, exitForMandatoryUpdate, explainUpdateError, installPendingUpdate } from "./platform/updater";
+import { createDesktopAuthState, desktopGoogleAuthUrl, explainFirebaseAuthError, observeFirebaseUser, signInWithGoogleAccount, signInWithGoogleDesktopCredential, signOutFirebaseUser } from "./platform/firebaseClient";
+import { buildSafeDiagnostics } from "./platform/diagnostics";
+import { enrichExampleDocument } from "./platform/exampleDocument";
 
 const LogicCanvas = lazy(() => import("./components/LogicCanvas").then((module) => ({ default: module.LogicCanvas })));
 const RoutineFlowCanvas = lazy(() => import("./components/RoutineFlowCanvas").then((module) => ({ default: module.RoutineFlowCanvas })));
@@ -30,6 +36,7 @@ const MigrationDiffCanvas = lazy(() => import("./components/MigrationDiffCanvas"
 const MigrationPlanWorkspace = lazy(() => import("./components/MigrationPlanWorkspace").then((module) => ({ default: module.MigrationPlanWorkspace })));
 const FeedbackDialog = lazy(() => import("./components/FeedbackDialog").then((module) => ({ default: module.FeedbackDialog })));
 const UpdateDialog = lazy(() => import("./components/UpdateDialog").then((module) => ({ default: module.UpdateDialog })));
+const BetaNotesDialog = lazy(() => import("./components/BetaNotesDialog").then((module) => ({ default: module.BetaNotesDialog })));
 
 const UPDATE_DEFERRAL_KEY = "dbstudio.beta.update.deferred";
 
@@ -47,6 +54,43 @@ function documentTitle(file: FileIdentity | null): string {
   return file.path.split(/[\\/]/).at(-1) ?? file.path;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function runtimeOs(): string {
+  const source = `${navigator.platform} ${navigator.userAgent}`.toLowerCase();
+  if (source.includes("mac")) return "macos";
+  if (source.includes("win")) return "windows";
+  if (source.includes("linux")) return "linux";
+  return "unknown";
+}
+
+function runtimeArchitecture(): string {
+  const source = `${navigator.platform} ${navigator.userAgent}`.toLowerCase();
+  if (source.includes("arm64") || source.includes("aarch64")) return "arm64";
+  if (source.includes("x86_64") || source.includes("x64") || source.includes("win64")) return "x64";
+  return "unknown";
+}
+
+function diagnosticCode(message: string | null): string[] {
+  if (!message) return [];
+  const lower = message.toLowerCase();
+  if (lower.includes("firebase") || lower.includes("sign-in") || lower.includes("sign in")) return ["auth.sign_in"];
+  if (lower.includes("create table") || lower.includes("parser") || lower.includes("dialect")) return ["sql.parse"];
+  if (lower.includes("save") || lower.includes("changed outside")) return ["file.save"];
+  if (lower.includes("update")) return ["update.check"];
+  return ["app.error"];
+}
+
+function explainReleaseError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("No supported CREATE TABLE")) {
+    return "No supported CREATE TABLE statements were found. DBStudio beta currently reads PostgreSQL and MySQL schema DDL; check the selected dialect and make sure the file or folder contains CREATE TABLE statements.";
+  }
+  return message;
+}
+
 export function App() {
   const [history, setHistory] = useState<OperationState | null>(null);
   const [migrationBaseline, setMigrationBaseline] = useState<SchemaDocument | null>(null);
@@ -59,6 +103,9 @@ export function App() {
   const [busy, setBusy] = useState(true);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [betaNotesOpen, setBetaNotesOpen] = useState(false);
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [signingIn, setSigningIn] = useState(false);
   const [schemaRevision, setSchemaRevision] = useState(0);
   const [layoutRevision, setLayoutRevision] = useState(0);
   const [sceneRevision, setSceneRevision] = useState(0);
@@ -122,14 +169,14 @@ export function App() {
   useEffect(() => {
     if (!document || layout?.kind !== "manual" || !layout.generation || appliedManualLayoutRef.current === layout.generation) return;
     appliedManualLayoutRef.current = layout.generation;
-    const positionById = new Map(layout.nodes.map((node) => [node.id, { x: node.x, y: node.y }]));
-    const next = { ...document, hasSavedLayout: true, tables: document.tables.map((table) => ({ ...table, position: positionById.get(table.id) ?? table.position })) };
+    const next = applyAutoLayout(document, layout);
     setHistory((current) => current ? commitOperation(current, { kind: "replaceDocument", label: "Auto layout", previous: current.document, next }) : current);
     setStatus("Auto layout applied · unsaved changes");
   }, [document, layout, setStatus]);
 
   const acceptOpenedDocument = useCallback(async (opened: OpenedDocument) => {
-    const parsed = applyMetadata(parseSchema(opened.source, opened.dialect), await loadMetadata(opened.path));
+    const metadata = await loadMetadata(opened.path);
+    const parsed = metadata ? applyMetadata(parseSchema(opened.source, opened.dialect), metadata) : opened.isExample ? enrichExampleDocument(parseSchema(opened.source, opened.dialect)) : parseSchema(opened.source, opened.dialect);
     if (parsed.tables.length === 0) throw new Error("No supported CREATE TABLE statements were found.");
     setHistory({ document: parsed, past: [], future: [] });
     setMigrationBaseline(parsed);
@@ -211,6 +258,56 @@ export function App() {
     void discardPendingUpdate();
   }, []);
 
+  useEffect(() => observeFirebaseUser(setAuthUser), []);
+
+  const signIn = useCallback(async () => {
+    setSigningIn(true);
+    setStatus("Opening account sign in…");
+    try {
+      if (desktopAvailable()) {
+        const state = createDesktopAuthState();
+        sessionStorage.setItem("dbstudio.desktopAuthState", state);
+        const callbackUrl = await beginDesktopAuth(state);
+        await openExternalUrl(desktopGoogleAuthUrl(state, callbackUrl));
+        setStatus("Continue Google sign-in in your browser");
+        for (let attempt = 0; attempt < 180; attempt += 1) {
+          const result = await pollDesktopAuthResult();
+          if (!result) {
+            await delay(1000);
+            continue;
+          }
+          if (result.state !== state) throw new Error("The desktop sign-in callback did not match this session. Please try again.");
+          const user = await signInWithGoogleDesktopCredential(result.idToken, result.accessToken);
+          setStatus(user.email ? `Signed in as ${user.email}` : "Signed in");
+          setFatalError(null);
+          return;
+        }
+        throw new Error("Google sign-in timed out. Start sign-in again and finish it in the browser.");
+      } else {
+        const user = await signInWithGoogleAccount();
+        setStatus(user.email ? `Signed in as ${user.email}` : "Signed in");
+        setFatalError(null);
+        return;
+      }
+    } catch (error) {
+      setFatalError(explainFirebaseAuthError(error));
+      setStatus("Sign in failed");
+    } finally {
+      setSigningIn(false);
+    }
+  }, [setStatus]);
+
+  const signOut = useCallback(async () => {
+    try {
+      await signOutFirebaseUser();
+      setStatus("Signed out");
+      setFatalError(null);
+    } catch (error) {
+      setFatalError(error instanceof Error ? error.message : String(error));
+      setStatus("Sign out failed");
+    }
+  }, [setStatus]);
+
   const openFolder = async () => {
     try {
       setBusy(true);
@@ -225,11 +322,41 @@ export function App() {
         await acceptOpenedWorkspace(opened, detection.dialect);
       }
     } catch (error) {
-      setFatalError(error instanceof Error ? error.message : String(error));
+      setFatalError(explainReleaseError(error));
     } finally {
       setBusy(false);
     }
   };
+
+  const openFile = async () => {
+    try {
+      setBusy(true);
+      setStatus("Opening SQL file…");
+      const opened = await openSqlFile();
+      if (!opened) return;
+      await acceptOpenedDocument(opened);
+    } catch (error) {
+      setFatalError(explainReleaseError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyDiagnostics = useCallback(async () => {
+    const diagnostics = buildSafeDiagnostics({
+      os: runtimeOs(),
+      architecture: runtimeArchitecture(),
+      desktop: desktopAvailable(),
+      recentErrorCodes: diagnosticCode(fatalError),
+    });
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(diagnostics, null, 2));
+      setStatus("Diagnostics copied");
+    } catch {
+      setFatalError("Could not copy diagnostics. Your system clipboard did not allow DBStudio to write.");
+      setStatus("Diagnostics copy failed");
+    }
+  }, [fatalError, setStatus]);
 
   const replaceDocument = useCallback((label: string, next: NonNullable<typeof document>) => {
     if (!document) return;
@@ -448,8 +575,13 @@ export function App() {
   const exportWorkspaceData = async () => {
     if (!document) return;
     try {
-      if (await exportWorkspaceDataFile(serializeMetadata(document))) setStatus("Workspace data exported");
-      setFatalError(null);
+      const exported = await exportWorkspaceDataFile(serializeMetadata(document));
+      if (exported) {
+        setStatus("Workspace data exported");
+        setFatalError(null);
+      } else {
+        setStatus("Workspace data export cancelled");
+      }
     } catch (error) {
       setFatalError(error instanceof Error ? error.message : String(error));
       setStatus("Workspace data export failed");
@@ -459,55 +591,15 @@ export function App() {
   return (
     <main className="app-shell">
       <Toolbar
-        title={sqlWorkspace?.rootName ?? documentTitle(file)}
-        dirty={Boolean(history?.past.length)}
-        canUndo={Boolean(history?.past.length)}
-        canRedo={Boolean(history?.future.length)}
-        desktop={desktopAvailable()}
-        dialect={sqlWorkspace?.dialect ?? file?.dialect ?? "postgresql"}
-        onExample={() => void showExample()}
-        onOpen={() => void openFolder()}
-        onImportWorkspaceData={() => void importWorkspaceData()}
-        onExportWorkspaceData={() => void exportWorkspaceData()}
-        onUndo={() => setHistory((current) => {
-          if (!current) return current;
-          const operation = current.past.at(-1);
-          if (operation && operationAffectsSql(operation)) setSchemaRevision((revision) => revision + 1);
-          if (operation && operationAffectsLayout(operation)) setLayoutRevision((revision) => revision + 1);
-          if (operation && operationAffectsCanvasScene(operation)) setSceneRevision((revision) => revision + 1);
-          if (operation) {
-            const changes = operationCanvasChanges(operation);
-            if (changes.topology) setCanvasTopologyRevision((revision) => revision + 1);
-            setCanvasChanges((value) => ({ ...changes, revision: value.revision + 1 }));
-          }
-          const next = undo(current);
-          if (sqlWorkspace) setSqlWorkspace((workspace) => workspace ? { ...workspace, dirtyFileIds: affectedWorkspaceFiles(workspace, workspace.document, next.document) } : workspace);
-          setStatus(next.past.length ? "Unsaved changes" : "All changes undone");
-          return next;
-        })}
-        onRedo={() => setHistory((current) => {
-          if (!current) return current;
-          const operation = current.future[0];
-          if (operation && operationAffectsSql(operation)) setSchemaRevision((revision) => revision + 1);
-          if (operation && operationAffectsLayout(operation)) setLayoutRevision((revision) => revision + 1);
-          if (operation && operationAffectsCanvasScene(operation)) setSceneRevision((revision) => revision + 1);
-          if (operation) {
-            const changes = operationCanvasChanges(operation);
-            if (changes.topology) setCanvasTopologyRevision((revision) => revision + 1);
-            setCanvasChanges((value) => ({ ...changes, revision: value.revision + 1 }));
-          }
-          const next = redo(current);
-          if (sqlWorkspace) setSqlWorkspace((workspace) => workspace ? { ...workspace, dirtyFileIds: affectedWorkspaceFiles(workspace, workspace.document, next.document) } : workspace);
-          setStatus(next.past.length ? "Unsaved changes" : "Ready");
-          return next;
-        })}
-        onFit={requestFit}
-        onPreview={() => setPreviewOpen(!previewOpen)}
-        onSave={() => void saveFile()}
         onFeedback={() => setFeedbackOpen(true)}
         onCheckForUpdates={() => void runUpdateCheck(true)}
         checkingForUpdates={updateState.phase === "checking"}
-        onDialectChange={changeDialect}
+        authUser={authUser}
+        signingIn={signingIn}
+        onSignIn={() => void signIn()}
+        onSignOut={() => void signOut()}
+        onBetaNotes={() => setBetaNotesOpen(true)}
+        onCopyDiagnostics={() => void copyDiagnostics()}
       />
       <section className="workspace">
         {document && <WorkspaceSidebar
@@ -524,6 +616,51 @@ export function App() {
           onOpen={() => void openFolder()}
           onReplace={replaceDocument}
         />}
+        <WorkspaceCommandBar
+          canUndo={Boolean(history?.past.length)}
+          canRedo={Boolean(history?.future.length)}
+          dialect={sqlWorkspace?.dialect ?? file?.dialect ?? "postgresql"}
+          title={sqlWorkspace?.rootName ?? documentTitle(file)}
+          dirty={Boolean(history?.past.length)}
+          onImportWorkspaceData={() => void importWorkspaceData()}
+          onExportWorkspaceData={() => void exportWorkspaceData()}
+          onUndo={() => setHistory((current) => {
+            if (!current) return current;
+            const operation = current.past.at(-1);
+            if (operation && operationAffectsSql(operation)) setSchemaRevision((revision) => revision + 1);
+            if (operation && operationAffectsLayout(operation)) setLayoutRevision((revision) => revision + 1);
+            if (operation && operationAffectsCanvasScene(operation)) setSceneRevision((revision) => revision + 1);
+            if (operation) {
+              const changes = operationCanvasChanges(operation);
+              if (changes.topology) setCanvasTopologyRevision((revision) => revision + 1);
+              setCanvasChanges((value) => ({ ...changes, revision: value.revision + 1 }));
+            }
+            const next = undo(current);
+            if (sqlWorkspace) setSqlWorkspace((workspace) => workspace ? { ...workspace, dirtyFileIds: affectedWorkspaceFiles(workspace, workspace.document, next.document) } : workspace);
+            setStatus(next.past.length ? "Unsaved changes" : "All changes undone");
+            return next;
+          })}
+          onRedo={() => setHistory((current) => {
+            if (!current) return current;
+            const operation = current.future[0];
+            if (operation && operationAffectsSql(operation)) setSchemaRevision((revision) => revision + 1);
+            if (operation && operationAffectsLayout(operation)) setLayoutRevision((revision) => revision + 1);
+            if (operation && operationAffectsCanvasScene(operation)) setSceneRevision((revision) => revision + 1);
+            if (operation) {
+              const changes = operationCanvasChanges(operation);
+              if (changes.topology) setCanvasTopologyRevision((revision) => revision + 1);
+              setCanvasChanges((value) => ({ ...changes, revision: value.revision + 1 }));
+            }
+            const next = redo(current);
+            if (sqlWorkspace) setSqlWorkspace((workspace) => workspace ? { ...workspace, dirtyFileIds: affectedWorkspaceFiles(workspace, workspace.document, next.document) } : workspace);
+            setStatus(next.past.length ? "Unsaved changes" : "Ready");
+            return next;
+          })}
+          onFit={requestFit}
+          onPreview={() => setPreviewOpen(!previewOpen)}
+          onSave={() => void saveFile()}
+          onDialectChange={changeDialect}
+        />
         <div className="diagram-region">
           <Suspense fallback={<div className="loading-state"><span />Preparing diagram…</div>}>
             {document && migrationMode ? (migrationPlan ? (migrationView === "canvas" ? <MigrationDiffCanvas plan={migrationPlan} decisions={migrationDecisions} /> : <MigrationPlanWorkspace plan={migrationPlan} />) : <div className="loading-state"><span />Comparing schemas…</div>) : document && logicMode && routineFlowId ? <RoutineFlowCanvas document={document} routineId={routineFlowId} onLayoutChange={(layout) => {
@@ -544,6 +681,17 @@ export function App() {
             /> : <div className="loading-state"><span />Preparing diagram…</div>}
           </Suspense>
           {document && !logicMode && !migrationMode && <CanvasToolbar document={document} />}
+          {document && file?.isExample && !sqlWorkspace && !history?.past.length && !busy && !logicMode && !migrationMode && (
+            <div className="welcome-card">
+              <strong>Welcome to the DBStudio beta</strong>
+              <p>Open a SQL file or folder to inspect your own schema. The bundled example is safe to edit and reset.</p>
+              <div>
+                <button onClick={() => void openFile()}>Open SQL file</button>
+                <button onClick={() => void openFolder()}>Open SQL folder</button>
+                <button onClick={() => setFeedbackOpen(true)}>Send feedback</button>
+              </div>
+            </div>
+          )}
           {document && !migrationMode && <SqlPreview open={previewOpen} sql={candidateSql} changes={history?.past.length ?? 0} onClose={() => setPreviewOpen(false)} />}
         </div>
       </section>
@@ -557,10 +705,12 @@ export function App() {
       {fatalError && (
         <div className="error-toast" role="alert">
           <div><strong>DBStudio couldn’t complete that action</strong><p>{fatalError}</p></div>
-          <button onClick={() => setFatalError(null)}>×</button>
+          <button className="error-feedback-button" onClick={() => setFeedbackOpen(true)}>Feedback</button>
+          <button className="error-close-button" onClick={() => setFatalError(null)}>×</button>
         </div>
       )}
       {feedbackOpen && <Suspense fallback={null}><FeedbackDialog onClose={() => setFeedbackOpen(false)} /></Suspense>}
+      {betaNotesOpen && <Suspense fallback={null}><BetaNotesDialog onClose={() => setBetaNotesOpen(false)} /></Suspense>}
       {updateState.dialogOpen && <Suspense fallback={null}><UpdateDialog
         phase={updateState.phase}
         update={updateState.update}
@@ -576,7 +726,7 @@ export function App() {
           void installPendingUpdate(({ downloaded, total, percent }) => {
             useUpdateStore.getState().setProgress(downloaded, total, percent);
             if (percent === 100) useUpdateStore.getState().setInstalling();
-          }).catch((error) => useUpdateStore.getState().setFailed(error instanceof Error ? error.message : String(error)));
+          }).catch((error) => useUpdateStore.getState().setFailed(explainUpdateError(error)));
         }}
         onLater={() => {
           if (!updateState.update || updateState.update.mandatory) return;

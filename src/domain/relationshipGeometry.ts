@@ -130,6 +130,43 @@ function removeRedundantPoints(points: Point[]): Point[] {
   });
 }
 
+const ANCHOR_CLEARANCE = 42;
+const DOUBLE_BACK_PENALTY = 4000;
+const ANCHOR_SIDES: readonly AnchorSide[] = ["right", "left"];
+
+/**
+ * Scores all four side pairings rather than assuming the tables face each
+ * other. Comparing table centres alone produced a doubled-back route whenever
+ * the two tables overlapped horizontally, which auto layout does often.
+ */
+export function chooseAnchorSides(
+  sourceNode: LayoutNode,
+  sourceTable: Table,
+  sourceColumnId: string,
+  targetNode: LayoutNode,
+  targetTable: Table,
+  targetColumnId: string,
+): { sourceSide: AnchorSide; targetSide: AnchorSide } {
+  let best = { sourceSide: "right" as AnchorSide, targetSide: "left" as AnchorSide };
+  let bestCost = Number.POSITIVE_INFINITY;
+  ANCHOR_SIDES.forEach((sourceSide) => ANCHOR_SIDES.forEach((targetSide) => {
+    const source = fieldAnchor(sourceNode, sourceTable, sourceColumnId, sourceSide).point;
+    const target = fieldAnchor(targetNode, targetTable, targetColumnId, targetSide).point;
+    const sourceDirection = sourceSide === "right" ? 1 : -1;
+    const targetDirection = targetSide === "right" ? 1 : -1;
+    const span = (target.x + targetDirection * ANCHOR_CLEARANCE) - (source.x + sourceDirection * ANCHOR_CLEARANCE);
+    // Both stubs must point into the gap between the tables; otherwise the
+    // route has to turn back across the card it just left.
+    const doublesBack = span * sourceDirection < 0 || span * targetDirection > 0;
+    const cost = Math.abs(target.x - source.x) + Math.abs(target.y - source.y) + (doublesBack ? DOUBLE_BACK_PENALTY : 0);
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = { sourceSide, targetSide };
+    }
+  }));
+  return best;
+}
+
 export function buildRelationshipGeometry(
   document: SchemaDocument,
   relationship: Relationship,
@@ -144,10 +181,7 @@ export function buildRelationshipGeometry(
   const targetNode = nodeById.get(relationship.targetTableId);
   if (!sourceTable || !targetTable || !sourceColumn || !sourceNode || !targetNode) return null;
 
-  const sourceCenter = sourceNode.x + sourceNode.width / 2;
-  const targetCenter = targetNode.x + targetNode.width / 2;
-  const sourceSide: AnchorSide = sourceCenter <= targetCenter ? "right" : "left";
-  const targetSide: AnchorSide = sourceSide === "right" ? "left" : "right";
+  const { sourceSide, targetSide } = chooseAnchorSides(sourceNode, sourceTable, relationship.sourceColumnId, targetNode, targetTable, relationship.targetColumnId);
   const source = fieldAnchor(sourceNode, sourceTable, relationship.sourceColumnId, sourceSide);
   const target = fieldAnchor(targetNode, targetTable, relationship.targetColumnId, targetSide);
   const sourceDirection = sourceSide === "right" ? 1 : -1;

@@ -1,0 +1,1 @@
+404f094642ae47ee18d6eded58b95ea10662415f8a984ad321fb348332dfa712  ./DBStudio_0.1.0-beta.1_amd64.deb

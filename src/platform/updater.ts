@@ -62,6 +62,20 @@ function metadataFor(update: NativeUpdate): UpdateMetadata {
   };
 }
 
+export function explainUpdateError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("valid release JSON") || message.includes("release JSON")) {
+    return "Beta updates are not published yet. You can keep using this build and install the next beta manually when it is available.";
+  }
+  if (message.includes("Could not fetch") || message.includes("fetch")) {
+    return "DBStudio could not reach the beta update service. Check the release endpoint and your network, then retry.";
+  }
+  if (message.includes("signature")) {
+    return "The update signature could not be verified. Rebuild the updater artifact with the beta signing key.";
+  }
+  return message || "The update could not be completed. Your current installation was not changed.";
+}
+
 async function nativeBoundary(): Promise<UpdaterBoundary> {
   const [{ check }, { relaunch, exit }] = await Promise.all([
     import("@tauri-apps/plugin-updater"),
@@ -77,7 +91,12 @@ export async function checkForAppUpdate(boundary?: UpdaterBoundary): Promise<App
     await pendingUpdate.close().catch(() => undefined);
     pendingUpdate = null;
   }
-  const update = await native.check({ timeout: CHECK_TIMEOUT_MS, allowDowngrades: false });
+  let update: NativeUpdate | null;
+  try {
+    update = await native.check({ timeout: CHECK_TIMEOUT_MS, allowDowngrades: false });
+  } catch (error) {
+    throw new Error(explainUpdateError(error));
+  }
   if (!update) return { kind: "current" };
   const decision = evaluateUpdate(APP_VERSION, metadataFor(update));
   if (decision.kind !== "available") {

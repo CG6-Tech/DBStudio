@@ -1,6 +1,7 @@
 import { registerModelConnector } from "./modelConnector";
 import { claudeCodeConnector, codexConnector } from "./connectors/agentConnectors";
 import { registerExplainRoutineSkill } from "./skills/explainRoutine";
+import { registerDraftMigrationChangeSkill } from "./skills/draftMigrationChange";
 
 /**
  * Startup wiring for the AI layer. This is the first production seam-registration
@@ -15,4 +16,5 @@ export function registerConnectors(): void {
   registerModelConnector(claudeCodeConnector);
   registerModelConnector(codexConnector);
   registerExplainRoutineSkill();
+  registerDraftMigrationChangeSkill();
 }

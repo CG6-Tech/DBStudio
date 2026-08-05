@@ -15,6 +15,7 @@ import { calculateVirtualTableRange, virtualTableOffset, type VirtualTableMetric
 import { MigrationSourceDialog } from "./MigrationSourceDialog";
 import { useUiStore } from "../state/uiStore";
 import { changeNeedsBackfill, migrationRequirements, type MigrationRequirement } from "../domain/migrationRequirements";
+import { DraftChangeSection } from "./ai/DraftChangeSection";
 
 export interface MigrationSource {
   id: string;
@@ -127,6 +128,8 @@ export function MigrationPlannerPanel({ current, baseline, onChooseSource, onCho
   const changeMetrics: VirtualTableMetrics = { count: migrationChanges.length, rowHeight: 48, expandedIndex: expandedChangeIndex, expandedExtraHeight: 150 };
   const changeRange = calculateVirtualTableRange(changeMetrics, changeScrollTop, changeViewportHeight, 192);
   const selectedChange = planResult.plan?.changes.find((change) => change.id === selectedChangeId) ?? null;
+  const planDialect = planResult.plan?.desired.dialect ?? "postgresql";
+  const siblingTable = (change: MigrationChange) => planResult.plan?.desired.tables.find((table) => table.key === change.tableKey);
   const requirements = useMemo(() => planResult.plan ? migrationRequirements(planResult.plan, decisions) : [], [decisions, planResult.plan]);
   const unresolvedRequirements = requirements.filter((requirement) => !requirement.resolved);
   const selectedSql = useMemo(() => {
@@ -249,8 +252,8 @@ export function MigrationPlannerPanel({ current, baseline, onChooseSource, onCho
               {expanded && <div className="migration-change-details">
                 <p>{change.reason}</p>
                 <div><span>Phase</span><b>{change.phase}</b></div>
-                {needsBackfill && <label><span>Backfill expression</span><input value={decisions.backfills?.[change.id] ?? ""} placeholder="SQL expression" onChange={(event) => setBackfill(change.id, event.target.value)} /></label>}
-                {change.risk === "blocked" && !needsBackfill && <label className="migration-approval"><input type="checkbox" checked={Boolean(decisions.approvals?.[change.id]?.approved)} onChange={(event) => approve(change.id, event.target.checked)} /><span>I approve this destructive change</span></label>}
+                {needsBackfill && <><label><span>Backfill expression</span><input value={decisions.backfills?.[change.id] ?? ""} placeholder="SQL expression" onChange={(event) => setBackfill(change.id, event.target.value)} /></label><DraftChangeSection change={change} dialect={planDialect} table={siblingTable(change)} mode="backfill" onAccept={(expr) => setBackfill(change.id, expr)} /></>}
+                {change.risk === "blocked" && !needsBackfill && <><label className="migration-approval"><input type="checkbox" checked={Boolean(decisions.approvals?.[change.id]?.approved)} onChange={(event) => approve(change.id, event.target.checked)} /><span>I approve this destructive change</span></label><DraftChangeSection change={change} dialect={planDialect} mode="blocked" /></>}
               </div>}
             </article>;
           })}
@@ -264,8 +267,8 @@ export function MigrationPlannerPanel({ current, baseline, onChooseSource, onCho
           <p>{selectedChange.reason}</p>
           <div className="migration-before-after"><span><small>Old</small><b title={changeValueSummary(selectedChange.before)}>{changeValueSummary(selectedChange.before)}</b></span><ArrowDownToLine size={12} /><span><small>New</small><b title={changeValueSummary(selectedChange.after)}>{changeValueSummary(selectedChange.after)}</b></span></div>
           <dl><div><dt>Phase</dt><dd>{selectedChange.phase}</dd></div><div><dt>Risk</dt><dd>{riskLabels[selectedChange.risk]}</dd></div><div><dt>Reversible</dt><dd>{selectedChange.reversible ? "Yes" : "No"}</dd></div></dl>
-          {changeNeedsBackfill(selectedChange) && <label><span>Backfill expression</span><input value={decisions.backfills?.[selectedChange.id] ?? ""} placeholder="SQL expression for existing rows" onChange={(event) => setBackfill(selectedChange.id, event.target.value)} /></label>}
-          {selectedChange.risk === "blocked" && !changeNeedsBackfill(selectedChange) && <label className="migration-approval"><input type="checkbox" checked={Boolean(decisions.approvals?.[selectedChange.id]?.approved)} onChange={(event) => approve(selectedChange.id, event.target.checked)} /><span>I approve this destructive change</span></label>}
+          {changeNeedsBackfill(selectedChange) && <><label><span>Backfill expression</span><input value={decisions.backfills?.[selectedChange.id] ?? ""} placeholder="SQL expression for existing rows" onChange={(event) => setBackfill(selectedChange.id, event.target.value)} /></label><DraftChangeSection change={selectedChange} dialect={planDialect} table={siblingTable(selectedChange)} mode="backfill" onAccept={(expr) => setBackfill(selectedChange.id, expr)} /></>}
+          {selectedChange.risk === "blocked" && !changeNeedsBackfill(selectedChange) && <><label className="migration-approval"><input type="checkbox" checked={Boolean(decisions.approvals?.[selectedChange.id]?.approved)} onChange={(event) => approve(selectedChange.id, event.target.checked)} /><span>I approve this destructive change</span></label><DraftChangeSection change={selectedChange} dialect={planDialect} mode="blocked" /></>}
           {selectedSql && <details><summary>SQL statement</summary><SqlText sql={selectedSql} className="migration-selected-sql" maxHeight={180} /></details>}
         </div> : <div className="migration-canvas-hint">Select a changed row on the canvas to inspect its old and new values.</div>}
       </section>}

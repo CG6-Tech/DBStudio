@@ -680,6 +680,21 @@ button { color: inherit; }
 .ai-explain-list ul { margin: 0; padding-left: 15px; display: grid; gap: 3px; color: #c3cec8; font-size: 9px; line-height: 1.5; }
 .ai-explain-risks ul { color: #e7c08f; }
 .ai-explain-regenerate { justify-self: start; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid #34454f; border-radius: 5px; color: #8ee0b7; background: transparent; cursor: pointer; font-size: 8px; }
+.ai-draft { margin-top: 8px; display: grid; gap: 8px; }
+.ai-draft-run, .ai-draft-configure { width: 100%; height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #3b554b; border-radius: 6px; color: #8ee0b7; background: #13211c; cursor: pointer; font-size: 9px; }
+.ai-draft-run:disabled { opacity: .68; cursor: default; }
+.ai-draft-configure { color: #b6c3bd; border-style: dashed; }
+.ai-draft .spin { animation: spin .8s linear infinite; }
+.ai-draft-error { display: flex; align-items: flex-start; gap: 6px; margin: 0; padding: 8px; border: 1px solid rgba(239,107,115,.3); border-radius: 5px; color: #ef969c; background: rgba(239,107,115,.07); font-size: 9px; line-height: 1.45; }
+.ai-draft-result { display: grid; gap: 8px; }
+.ai-draft-suggestion { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid #3b554b; border-radius: 6px; background: #0c1a14; }
+.ai-draft-suggestion code { flex: 1; min-width: 0; overflow-x: auto; white-space: pre; color: #8ee0b7; font: 9px var(--mono); }
+.ai-draft-accept { flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border: 1px solid #3b554b; border-radius: 5px; color: #0c1a14; background: #8ee0b7; cursor: pointer; font-size: 8px; font-weight: 600; }
+.ai-draft-rationale { margin: 0; color: #d7e1dc; font-size: 9px; line-height: 1.55; }
+.ai-draft-list h4 { margin: 0 0 4px; color: #7b878f; font-size: 8px; letter-spacing: .09em; text-transform: uppercase; }
+.ai-draft-list ul { margin: 0; padding-left: 15px; display: grid; gap: 3px; color: #c3cec8; font-size: 9px; line-height: 1.5; }
+.ai-draft-risks ul { color: #e7c08f; }
+.ai-draft-regenerate { justify-self: start; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid #34454f; border-radius: 5px; color: #8ee0b7; background: transparent; cursor: pointer; font-size: 8px; }
 .ai-settings-note { margin: 0 14px 10px; color: #7b878f; font-size: 8px; line-height: 1.5; }
 .ai-settings-note code { padding: 1px 4px; border-radius: 3px; background: #0c1a14; color: #8ee0b7; font: 8px var(--mono); }
 .ai-agent-choices { display: grid; gap: 8px; padding: 4px 14px 10px; }

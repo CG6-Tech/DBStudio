@@ -22,6 +22,7 @@ import type { MigrationSource } from "./components/MigrationPlannerPanel";
 import type { MigrationPlan, MigrationPlanDecisions } from "./domain/migrationPlanner";
 import { applyMetadata, loadMetadata, saveMetadata, serializeMetadata } from "./platform/metadata";
 import { useUiStore } from "./state/uiStore";
+import { useAiStore } from "./state/aiStore";
 import { useUpdateStore } from "./state/updateStore";
 import { UPDATE_CHECK_INTERVAL_MS, isUpdateDeferred } from "./platform/updatePolicy";
 import { checkForAppUpdate, discardPendingUpdate, exitForMandatoryUpdate, explainUpdateError, installPendingUpdate } from "./platform/updater";
@@ -37,6 +38,7 @@ const MigrationPlanWorkspace = lazy(() => import("./components/MigrationPlanWork
 const FeedbackDialog = lazy(() => import("./components/FeedbackDialog").then((module) => ({ default: module.FeedbackDialog })));
 const UpdateDialog = lazy(() => import("./components/UpdateDialog").then((module) => ({ default: module.UpdateDialog })));
 const BetaNotesDialog = lazy(() => import("./components/BetaNotesDialog").then((module) => ({ default: module.BetaNotesDialog })));
+const AiSettingsDialog = lazy(() => import("./components/ai/AiSettingsDialog").then((module) => ({ default: module.AiSettingsDialog })));
 
 const UPDATE_DEFERRAL_KEY = "dbstudio.beta.update.deferred";
 
@@ -112,6 +114,8 @@ export function App() {
   const [canvasTopologyRevision, setCanvasTopologyRevision] = useState(0);
   const [canvasChanges, setCanvasChanges] = useState<CanvasOperationChanges & { revision: number }>({ revision: 0, topology: true, tableIds: [], areaIds: [], noteIds: [] });
   const updateState = useUpdateStore();
+  const aiSettingsOpen = useAiStore((state) => state.settingsOpen);
+  const closeAiSettings = useAiStore((state) => state.closeSettings);
   const setSelection = useUiStore((state) => state.setSelection);
   const previewOpen = useUiStore((state) => state.previewOpen);
   const setPreviewOpen = useUiStore((state) => state.setPreviewOpen);
@@ -709,6 +713,7 @@ export function App() {
           <button className="error-close-button" onClick={() => setFatalError(null)}>×</button>
         </div>
       )}
+      {aiSettingsOpen && <Suspense fallback={null}><AiSettingsDialog onClose={closeAiSettings} /></Suspense>}
       {feedbackOpen && <Suspense fallback={null}><FeedbackDialog onClose={() => setFeedbackOpen(false)} /></Suspense>}
       {betaNotesOpen && <Suspense fallback={null}><BetaNotesDialog onClose={() => setBetaNotesOpen(false)} /></Suspense>}
       {updateState.dialogOpen && <Suspense fallback={null}><UpdateDialog

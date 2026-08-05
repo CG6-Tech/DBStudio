@@ -20,8 +20,6 @@ import { useFlowGeometry } from "./flow/useFlowGeometry";
 import { InspectorActions, InspectorMeta, InspectorMetaRow, InspectorSection, InspectorShell, InspectorTitle } from "./ui/InspectorPrimitives";
 import { SqlText } from "./ui/SqlText";
 import { ExplainSection } from "./ai/ExplainSection";
-import { AiSettingsDialog } from "./ai/AiSettingsDialog";
-import { useAiStore } from "../state/aiStore";
 
 const cache = new Map<string, ReturnType<typeof parseRoutineFlow>>();
 const ROUTINE_FLOW_ALGORITHM_VERSION = 10;
@@ -143,12 +141,5 @@ export function RoutineFlowCanvas({ document, routineId, onLayoutChange }: { doc
       {flow.diagnostics.length > 0 && <div className="routine-flow-warning">⚠ {flow.diagnostics.length} parser warning{flow.diagnostics.length === 1 ? "" : "s"}</div>}
     </div>
     {selected && <RoutineFlowInspector node={selected} dialect={document.dialect} routineName={routine.name} pinned={pinned.has(selected.id)} onClose={() => setSelectedId(null)} onTogglePin={() => togglePin(selected.id)} />}
-    <RoutineFlowSettingsMount />
   </div>;
-}
-
-function RoutineFlowSettingsMount() {
-  const settingsOpen = useAiStore((state) => state.settingsOpen);
-  const closeSettings = useAiStore((state) => state.closeSettings);
-  return settingsOpen ? <AiSettingsDialog onClose={closeSettings} /> : null;
 }

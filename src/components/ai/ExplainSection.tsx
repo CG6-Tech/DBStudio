@@ -33,6 +33,9 @@ export function ExplainSection({ targetId, input }: { targetId: string; input: E
 
   return (
     <InspectorSection title="AI explanation" className="ai-explain">
+      <button className="ai-explain-settings" onClick={openSettings} title="AI provider settings" aria-label="AI provider settings">
+        <Settings2 size={13} />
+      </button>
       {!configured && (
         <button className="ai-explain-configure" onClick={openSettings}>
           <Settings2 size={13} /> Configure an AI provider to explain this

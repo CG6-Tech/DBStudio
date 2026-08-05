@@ -1,7 +1,7 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { projectPoint } from "../../domain/canvasGeometry";
 import type { ViewportBounds } from "../../domain/viewportGeometry";
-import type { CanvasViewport } from "./canvasViewport";
+import { minimapViewportRect, type CanvasViewport } from "./canvasViewport";
 
 export interface MinimapNode {
   id: string;
@@ -23,13 +23,12 @@ export function boundsForNodes(nodes: readonly MinimapNode[]): ViewportBounds {
 
 export function CanvasMinimap({ className, label, nodes, bounds, viewport, host, onCenter }: { className: string; label: string; nodes: readonly MinimapNode[]; bounds: ViewportBounds; viewport: CanvasViewport; host: HTMLElement | null; onCenter: (point: { x: number; y: number }) => void }) {
   const rect = host?.getBoundingClientRect();
-  const topLeft = rect ? projectPoint({ x: -viewport.x / viewport.scale, y: -viewport.y / viewport.scale }, bounds) : null;
-  const bottomRight = rect ? projectPoint({ x: (rect.width - viewport.x) / viewport.scale, y: (rect.height - viewport.y) / viewport.scale }, bounds) : null;
-  const viewportStyle = topLeft && bottomRight ? {
-    left: `${Math.max(0, topLeft.x) * 100}%`,
-    top: `${Math.max(0, topLeft.y) * 100}%`,
-    width: `${Math.max(3, (Math.min(1, bottomRight.x) - Math.max(0, topLeft.x)) * 100)}%`,
-    height: `${Math.max(3, (Math.min(1, bottomRight.y) - Math.max(0, topLeft.y)) * 100)}%`,
+  const indicator = rect ? minimapViewportRect(viewport, rect, bounds) : null;
+  const viewportStyle = indicator ? {
+    left: `${indicator.left * 100}%`,
+    top: `${indicator.top * 100}%`,
+    width: `${indicator.width * 100}%`,
+    height: `${indicator.height * 100}%`,
   } : null;
   const jump = (event: ReactPointerEvent<HTMLDivElement>) => {
     const mini = event.currentTarget.getBoundingClientRect();

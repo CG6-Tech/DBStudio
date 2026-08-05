@@ -666,6 +666,18 @@ button { color: inherit; }
 .logic-inspector-sql-toggle svg { color: #8ee0b7; }
 .logic-inspector-sql-toggle strong { font: 8px var(--mono); font-weight: 800; text-transform: uppercase; }
 .logic-inspector-section.sql .sql-text { max-height: 360px; padding: 10px; border: 1px solid #263641; border-radius: 7px; background: #071018; font: 9px/1.65 var(--mono); }
+.ai-explain .ai-explain-run, .ai-explain .ai-explain-configure { width: 100%; height: 31px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #3b554b; border-radius: 6px; color: #8ee0b7; background: #13211c; cursor: pointer; font-size: 10px; }
+.ai-explain .ai-explain-run:disabled { opacity: .68; cursor: default; }
+.ai-explain .ai-explain-configure { color: #b6c3bd; border-style: dashed; }
+.ai-explain .spin { animation: spin .8s linear infinite; }
+.ai-explain-error { display: flex; align-items: flex-start; gap: 6px; margin: 8px 0 0; padding: 8px; border: 1px solid rgba(239,107,115,.3); border-radius: 5px; color: #ef969c; background: rgba(239,107,115,.07); font-size: 9px; line-height: 1.45; }
+.ai-explain-result { display: grid; gap: 10px; }
+.ai-explain-summary { margin: 0; color: #d7e1dc; font-size: 10px; line-height: 1.55; }
+.ai-explain-list h4 { margin: 0 0 4px; color: #7b878f; font-size: 8px; letter-spacing: .09em; text-transform: uppercase; }
+.ai-explain-list ul { margin: 0; padding-left: 15px; display: grid; gap: 3px; color: #c3cec8; font-size: 9px; line-height: 1.5; }
+.ai-explain-risks ul { color: #e7c08f; }
+.ai-explain-regenerate { justify-self: start; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid #34454f; border-radius: 5px; color: #8ee0b7; background: transparent; cursor: pointer; font-size: 8px; }
+.ai-settings-note { margin: 0 14px 10px; color: #7b878f; font-size: 8px; line-height: 1.5; }
 .logic-empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; color: #66766f; text-align: center; }.logic-empty > span { color: #7ee0b5; font-size: 36px; }.logic-empty h2 { margin: 10px 0 5px; color: #d7e1dc; font-size: 17px; }.logic-empty p { max-width: 340px; margin: 0; font-size: 11px; line-height: 1.5; }
 .logic-list-item { position: relative; }.logic-list-item > button:first-of-type { padding-right: 54px; }.logic-list-item .logic-open-flow { position: absolute; right: 6px; top: 8px; width: auto; padding: 5px 7px; border: 1px solid #3b4c47; border-left: 1px solid #3b4c47; color: #7ee0b5; background: #13211c; font-size: 8px; }.logic-inspector-flow { margin: -7px 0 14px; padding: 7px 10px; border: 1px solid #3b554b; border-radius: 6px; color: #7ee0b5; background: #13211c; cursor: pointer; }
 .routine-flow-shell { position: absolute; inset: 0; display: grid; grid-template-rows: 47px minmax(0, 1fr); background: #111318; }.routine-flow-header { z-index: 5; display: flex; align-items: center; gap: 8px; padding: 0 13px; border-bottom: 1px solid #2d3239; background: #1a1d23; color: #7d858e; font-size: 10px; }.routine-flow-header > button, .routine-flow-header div button { padding: 6px 9px; border: 1px solid #3a4048; border-radius: 5px; color: #b8bec5; background: #22262d; cursor: pointer; }.routine-flow-header > button { color: #ff865e; }.routine-flow-header strong { color: #e8eaed; }.routine-flow-header div { display: flex; gap: 5px; margin-left: auto; }

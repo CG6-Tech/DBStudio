@@ -1,5 +1,4 @@
 import type { MigrationChange, MigrationPlan, MigrationPlanDecisions, MigrationRenameSuggestion } from "./migrationPlanner";
-import type { MigrationSnapshotColumn } from "./migrationSnapshot";
 
 export type MigrationRequirementKind = "rename" | "backfill" | "approval";
 
@@ -15,8 +14,7 @@ export interface MigrationRequirement {
 
 export function changeNeedsBackfill(change: MigrationChange): boolean {
   if (change.kind !== "add-column") return false;
-  const column = change.after as MigrationSnapshotColumn;
-  return !column.nullable && !column.defaultExpression;
+  return !change.after.nullable && !change.after.defaultExpression;
 }
 
 function changeMatchesRename(change: MigrationChange, suggestion: MigrationRenameSuggestion): boolean {
@@ -24,8 +22,8 @@ function changeMatchesRename(change: MigrationChange, suggestion: MigrationRenam
     return change.objectKind === "table" && (change.objectKey === suggestion.targetKey || change.objectKey === suggestion.desiredKey);
   }
   if (change.objectKind !== "column" || change.tableKey !== suggestion.tableKey) return false;
-  const before = change.before as MigrationSnapshotColumn | undefined;
-  const after = change.after as MigrationSnapshotColumn | undefined;
+  const before = "before" in change ? change.before : undefined;
+  const after = "after" in change ? change.after : undefined;
   return before?.key === suggestion.targetKey || after?.key === suggestion.desiredKey;
 }
 

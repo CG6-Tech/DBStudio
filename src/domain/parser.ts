@@ -9,7 +9,7 @@ interface Token extends SourceRange {
   kind: "word" | "quoted" | "symbol" | "string";
 }
 
-function unquoteIdentifier(value: string): string {
+export function unquoteIdentifier(value: string): string {
   if (value.startsWith('"')) return value.slice(1, -1).replaceAll('""', '"');
   if (value.startsWith("`")) return value.slice(1, -1).replaceAll("``", "`");
   return value;
@@ -19,7 +19,7 @@ function unquoteString(value: string): string {
   return value.startsWith("'") ? value.slice(1, -1).replaceAll("''", "'") : value;
 }
 
-function stablePart(value: string): string {
+export function stablePart(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_]+/g, "-");
 }
 

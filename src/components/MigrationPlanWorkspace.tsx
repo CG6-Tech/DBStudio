@@ -27,9 +27,9 @@ export function MigrationPlanWorkspace({ plan }: { plan: MigrationPlan }) {
         <span className="migration-plan-order">{String(index + 1).padStart(2, "0")}</span>
         <i>{change.risk === "safe" ? <Check size={14} /> : change.risk === "review" ? <CircleAlert size={14} /> : <ShieldAlert size={14} />}</i>
         <span className="migration-plan-operation"><strong>{title(change)}</strong><small title={change.objectKey}>{change.objectKey}</small></span>
-        <span className="migration-plan-value"><small>Old</small><b title={valueSummary(change.before)}>{valueSummary(change.before)}</b></span>
+        <span className="migration-plan-value"><small>Old</small><b title={valueSummary("before" in change ? change.before : undefined)}>{valueSummary("before" in change ? change.before : undefined)}</b></span>
         <ArrowRight className="migration-plan-arrow" size={14} />
-        <span className="migration-plan-value"><small>New</small><b title={valueSummary(change.after)}>{valueSummary(change.after)}</b></span>
+        <span className="migration-plan-value"><small>New</small><b title={valueSummary("after" in change ? change.after : undefined)}>{valueSummary("after" in change ? change.after : undefined)}</b></span>
         <span className="migration-plan-reason"><small>{change.phase}</small><b>{change.reason}</b></span>
       </button>)}
     </div>

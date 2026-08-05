@@ -30,9 +30,10 @@ import {
   type ColumnVisual,
   type TableBackgroundVisual,
 } from "./canvas/TableCard";
-import { syncCanvasGrid, wheelViewport, zoomViewportAtCenter } from "./canvas/canvasViewport";
+import { minimapViewportRect, syncCanvasGrid, wheelViewport, zoomViewportAtCenter } from "./canvas/canvasViewport";
 import { CANVAS_RENDERER_PREFERENCE } from "./canvas/rendererPreference";
 import { sceneLayoutKey, shouldFitLayoutGeneration } from "./canvas/sceneLayoutKey";
+import { areaLabelOffset, areaResizeTargetSize, colorNumber, colors, pixelPoint, tableCommentSize } from "./canvas/canvasScenePrimitives";
 
 interface SpatialItem {
   minX: number;
@@ -131,32 +132,6 @@ type CanvasObjectMenu = {
   y: number;
   confirmingDelete?: boolean;
 };
-
-const colors = {
-  canvas: 0x0d1114,
-  grid: 0x20272b,
-  card: 0x171d21,
-  cardTop: 0x1e262b,
-  border: 0x344047,
-  selected: 0x7ee0b5,
-  text: 0xe9f1ed,
-  muted: 0x8f9b97,
-  type: 0x799089,
-  key: 0xf5bd69,
-  edge: 0x63736d,
-};
-
-const areaResizeTargetSize = 28;
-const areaLabelOffset = { x: 12, y: -15 };
-const tableCommentSize = { width: 220, height: 110, gap: 18 };
-
-function pixelPoint(point: Point): Point {
-  return { x: Math.round(point.x), y: Math.round(point.y) };
-}
-
-function colorNumber(value: string): number {
-  return Number.parseInt(value.replace("#", ""), 16);
-}
 
 function createCanvasNoteAnnotation(text: string, color: number, label: string): Container {
   const container = new Container();
@@ -440,13 +415,11 @@ export function DiagramCanvas({ document, layout, onReplace, highlightedTableIds
         gridLevelRef.current = syncCanvasGrid(hostRef.current, viewport, gridLevelRef.current);
         const minimapViewport = minimapViewportRef.current;
         if (minimapViewport) {
-          const bounds = workspaceBoundsRef.current;
-          const topLeft = projectPoint({ x: -viewport.x / viewport.scale, y: -viewport.y / viewport.scale }, bounds);
-          const bottomRight = projectPoint({ x: (app.screen.width - viewport.x) / viewport.scale, y: (app.screen.height - viewport.y) / viewport.scale }, bounds);
-          minimapViewport.style.left = `${Math.max(0, topLeft.x) * 100}%`;
-          minimapViewport.style.top = `${Math.max(0, topLeft.y) * 100}%`;
-          minimapViewport.style.width = `${Math.max(3, (Math.min(1, bottomRight.x) - Math.max(0, topLeft.x)) * 100)}%`;
-          minimapViewport.style.height = `${Math.max(3, (Math.min(1, bottomRight.y) - Math.max(0, topLeft.y)) * 100)}%`;
+          const rect = minimapViewportRect(viewport, app.screen, workspaceBoundsRef.current);
+          minimapViewport.style.left = `${rect.left * 100}%`;
+          minimapViewport.style.top = `${rect.top * 100}%`;
+          minimapViewport.style.width = `${rect.width * 100}%`;
+          minimapViewport.style.height = `${rect.height * 100}%`;
         }
         setZoom(viewport.scale);
       };

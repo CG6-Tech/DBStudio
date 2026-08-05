@@ -1,15 +1,31 @@
 import { getApp, getApps, initializeApp } from "firebase/app";
 import { browserLocalPersistence, getAuth, GoogleAuthProvider, onAuthStateChanged, setPersistence, signInAnonymously, signInWithCredential, signInWithPopup, signOut, type Unsubscribe, type User } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { runtimeConfig, type RuntimeConfig } from "./runtimeConfig";
 
-const DEFAULT_HOSTED_AUTH_URL = "https://mydb-studio.firebaseapp.com/desktop-auth";
+// Baked-in public identity of the reference `mydb-studio` project. These are the
+// values Firebase treats as non-secret client identifiers, so shipping them lets a
+// fresh `npm run dev` clone connect to the beta backend without a local `.env`.
+// When `VITE_FIREBASE_*` env is supplied it is validated by runtimeConfig (all-or-
+// nothing, HTTPS in production) and takes precedence over these defaults.
+const DEFAULT_FIREBASE: RuntimeConfig["firebase"] = {
+  apiKey: "AIzaSyDBBTpuBUhD6THIwr52N7_TpUEBwvV_XEU",
+  authDomain: "mydb-studio.firebaseapp.com",
+  projectId: "mydb-studio",
+  appId: "1:37334176472:web:c7cfb8ede338b1e824fdad",
+  storageBucket: "mydb-studio.firebasestorage.app",
+  functionsRegion: "us-central1",
+  hostedAuthUrl: "https://mydb-studio.firebaseapp.com/desktop-auth",
+};
+
+const firebase = runtimeConfig?.firebase ?? DEFAULT_FIREBASE;
 
 const config = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDBBTpuBUhD6THIwr52N7_TpUEBwvV_XEU",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "mydb-studio.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "mydb-studio",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:37334176472:web:c7cfb8ede338b1e824fdad",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "mydb-studio.firebasestorage.app",
+  apiKey: firebase.apiKey,
+  authDomain: firebase.authDomain,
+  projectId: firebase.projectId,
+  appId: firebase.appId,
+  storageBucket: firebase.storageBucket,
 };
 
 function app() { return getApps().length ? getApp() : initializeApp(config); }
@@ -26,7 +42,7 @@ export function createDesktopAuthState(): string {
   return crypto.randomUUID();
 }
 
-export function desktopGoogleAuthUrl(state: string, callbackUrl = "dbstudio://auth/callback", hostedAuthUrl = import.meta.env.VITE_FIREBASE_HOSTED_AUTH_URL || DEFAULT_HOSTED_AUTH_URL): string {
+export function desktopGoogleAuthUrl(state: string, callbackUrl = "dbstudio://auth/callback", hostedAuthUrl = firebase.hostedAuthUrl): string {
   const trimmed = hostedAuthUrl.trim();
   if (!trimmed) throw new Error("Google desktop sign-in needs a hosted auth bridge URL.");
   const url = new URL(trimmed);

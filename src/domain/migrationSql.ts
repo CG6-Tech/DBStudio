@@ -48,16 +48,15 @@ function foreignKeySql(foreignKey: MigrationSnapshotForeignKey, tableKey: string
 
 function renderChange(change: MigrationChange, plan: MigrationPlan, decisions: MigrationPlanDecisions): string[] {
   const dialect = plan.desired.dialect;
-  if (change.kind === "create-table") return [createTableSql(change.after as MigrationSnapshotTable, dialect)];
+  if (change.kind === "create-table") return [createTableSql(change.after, dialect)];
   if (change.kind === "drop-table") return [`DROP TABLE ${qualified(change.objectKey, dialect)};`];
   if (change.kind === "rename-table") {
-    const before = change.before as MigrationSnapshotTable;
-    const after = change.after as MigrationSnapshotTable;
+    const { before, after } = change;
     if ((before.schema ?? "public") !== (after.schema ?? "public")) return [`ALTER TABLE ${qualified(before.key, dialect)} SET SCHEMA ${quote(after.schema ?? "public", dialect)};`, `ALTER TABLE ${qualified(after.schema ? `${after.schema}.${before.name}` : `public.${before.name}`, dialect)} RENAME TO ${quote(after.name, dialect)};`];
     return [`ALTER TABLE ${qualified(before.key, dialect)} RENAME TO ${quote(after.name, dialect)};`];
   }
   if (change.kind === "add-column") {
-    const column = change.after as MigrationSnapshotColumn;
+    const column = change.after;
     const table = qualified(change.tableKey!, dialect);
     const backfill = decisions.backfills?.[change.id]?.trim();
     if (!column.nullable && !column.defaultExpression && backfill) {
@@ -67,11 +66,10 @@ function renderChange(change: MigrationChange, plan: MigrationPlan, decisions: M
     }
     return [`ALTER TABLE ${table} ADD COLUMN ${columnDefinition(column, dialect)};`];
   }
-  if (change.kind === "drop-column") return [`ALTER TABLE ${qualified(change.tableKey!, dialect)} DROP COLUMN ${quote((change.before as MigrationSnapshotColumn).name, dialect)};`];
-  if (change.kind === "rename-column") return [`ALTER TABLE ${qualified(change.tableKey!, dialect)} RENAME COLUMN ${quote((change.before as MigrationSnapshotColumn).name, dialect)} TO ${quote((change.after as MigrationSnapshotColumn).name, dialect)};`];
+  if (change.kind === "drop-column") return [`ALTER TABLE ${qualified(change.tableKey!, dialect)} DROP COLUMN ${quote(change.before.name, dialect)};`];
+  if (change.kind === "rename-column") return [`ALTER TABLE ${qualified(change.tableKey!, dialect)} RENAME COLUMN ${quote(change.before.name, dialect)} TO ${quote(change.after.name, dialect)};`];
   if (change.kind === "alter-column") {
-    const before = change.before as MigrationSnapshotColumn;
-    const after = change.after as MigrationSnapshotColumn;
+    const { before, after } = change;
     const table = qualified(change.tableKey!, dialect);
     const sql: string[] = [];
     if (before.dataType.toLowerCase() !== after.dataType.toLowerCase()) sql.push(dialect === "postgresql" ? `ALTER TABLE ${table} ALTER COLUMN ${quote(after.name, dialect)} TYPE ${after.dataType} USING ${quote(after.name, dialect)}::${after.dataType};` : `ALTER TABLE ${table} MODIFY COLUMN ${columnDefinition(after, dialect)};`);
@@ -79,30 +77,33 @@ function renderChange(change: MigrationChange, plan: MigrationPlan, decisions: M
     if (before.defaultExpression !== after.defaultExpression && dialect === "postgresql") sql.push(`ALTER TABLE ${table} ALTER COLUMN ${quote(after.name, dialect)} ${after.defaultExpression ? `SET DEFAULT ${after.defaultExpression}` : "DROP DEFAULT"};`);
     return sql;
   }
-  if (change.kind === "create-index") return [indexSql(change.after as MigrationSnapshotIndex, change.tableKey!, plan)];
+  if (change.kind === "create-index") return [indexSql(change.after, change.tableKey!, plan)];
   if (change.kind === "drop-index") {
-    const index = change.before as MigrationSnapshotIndex;
+    const index = change.before;
     return [dialect === "postgresql" ? `DROP INDEX${plan.strategy === "low-lock" ? " CONCURRENTLY" : ""} ${quote(index.name || index.key, dialect)};` : `DROP INDEX ${quote(index.name || index.key, dialect)} ON ${qualified(change.tableKey!, dialect)};`];
   }
-  if (change.kind === "add-foreign-key") return [foreignKeySql(change.after as MigrationSnapshotForeignKey, change.tableKey!, plan)];
+  if (change.kind === "add-foreign-key") return [foreignKeySql(change.after, change.tableKey!, plan)];
   if (change.kind === "drop-foreign-key") {
-    const foreignKey = change.before as MigrationSnapshotForeignKey;
+    const foreignKey = change.before;
     const action = dialect === "mysql" ? "DROP FOREIGN KEY" : "DROP CONSTRAINT";
     return [`ALTER TABLE ${qualified(change.tableKey!, dialect)} ${action} ${quote(foreignKey.key.replaceAll(/[^a-z0-9_]/gi, "_"), dialect)};`];
   }
   if (change.kind === "add-check") {
-    const check = change.after as { key: string; name?: string; expression: string };
+    const check = change.after;
     const name = quote(check.name || check.key.replaceAll(/[^a-z0-9_]/gi, "_"), dialect);
     return [`ALTER TABLE ${qualified(change.tableKey!, dialect)} ADD CONSTRAINT ${name} CHECK (${check.expression});`];
   }
   if (change.kind === "drop-check") {
-    const check = change.before as { key: string; name?: string };
+    const check = change.before;
     const name = quote(check.name || check.key.replaceAll(/[^a-z0-9_]/gi, "_"), dialect);
     return [`ALTER TABLE ${qualified(change.tableKey!, dialect)} DROP ${dialect === "mysql" ? "CHECK" : "CONSTRAINT"} ${name};`];
   }
-  if (change.kind === "create-object" || change.kind === "replace-object") return [(change.after as { definition: string }).definition.endsWith(";") ? (change.after as { definition: string }).definition : `${(change.after as { definition: string }).definition};`];
+  if (change.kind === "create-object" || change.kind === "replace-object") {
+    const definition = change.after.definition;
+    return [definition.endsWith(";") ? definition : `${definition};`];
+  }
   if (change.kind === "drop-object") {
-    const object = change.before as { kind: string; key: string; targetTable?: string; routineKind?: string };
+    const object = change.before;
     if (object.kind === "trigger" && dialect === "postgresql" && object.targetTable) return [`DROP TRIGGER ${quote(object.key.split(".").at(-1)!, dialect)} ON ${qualified(object.targetTable, dialect)};`];
     const kind = object.kind === "routine" ? (object.routineKind ?? "function") : object.kind;
     return [`DROP ${kind.toUpperCase()} ${qualified(object.key, dialect)};`];

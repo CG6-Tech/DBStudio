@@ -1,5 +1,5 @@
 import { parseFieldType } from "../dialects";
-import { parseSchema } from "./parser";
+import { parseSchemaDocument } from "./schemaParser";
 import { linkDatabaseLogic } from "./logicParser";
 import type { Column, CustomType, Relationship, SchemaDocument, SqlDialect, Table } from "./types";
 import {
@@ -90,7 +90,7 @@ function namespaceDocument(document: SchemaDocument, fileId: FileId): SchemaDocu
 
 export function parseWorkspaceFragment(file: WorkspaceFile, dialect: SqlDialect): SqlFileFragment {
   const source = file.source ?? "";
-  const document = namespaceDocument(parseSchema(source, dialect), file.id);
+  const document = namespaceDocument(parseSchemaDocument(source, dialect), file.id);
   return { file, document };
 }
 
@@ -158,7 +158,7 @@ export function linkWorkspaceFragments(fragmentsInput: readonly SqlFileFragment[
     syntheticOffset += source.length + 3;
     return source;
   }).join("\n;\n");
-  const synthetic = parseSchema(syntheticSource, dialect);
+  const synthetic = parseSchemaDocument(syntheticSource, dialect);
   diagnostics.push(...synthetic.diagnostics.filter((item) => item.message.startsWith("Foreign key ")));
   const syntheticTables = new Map(synthetic.tables.map((table) => [table.id, table]));
   const relationships = fragments.flatMap((fragment) => fragment.document.relationships);

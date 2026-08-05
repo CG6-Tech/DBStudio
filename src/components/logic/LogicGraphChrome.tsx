@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Pin, PinOff, Workflow } from "lucide-react";
 import type { LogicGraphNode } from "../../domain/logicGraph";
-import type { DatabaseTrigger, Routine, Table } from "../../domain/types";
+import type { DatabaseTrigger, Routine, SqlDialect, Table } from "../../domain/types";
+import { ExplainSection } from "../ai/ExplainSection";
 import type { ViewportBounds } from "../../domain/viewportGeometry";
 import type { CanvasViewport } from "../canvas/canvasViewport";
 import { boundsForNodes, CanvasMinimap } from "../canvas/CanvasMinimap";
@@ -47,7 +48,7 @@ export function LogicGraphMinimap({ nodes, positions, bounds, viewport, host, on
   return <CanvasMinimap className="logic-graph-minimap" label="Logic graph minimap" nodes={items} bounds={bounds} viewport={viewport} host={host} onCenter={onCenter} />;
 }
 
-export function LogicInspector({ node, source, pinned, onClose, onTogglePin, onOpenFlow }: { node: LogicGraphNode; source?: LogicSource; pinned: boolean; onClose: () => void; onTogglePin: () => void; onOpenFlow: () => void }) {
+export function LogicInspector({ node, source, dialect, pinned, onClose, onTogglePin, onOpenFlow }: { node: LogicGraphNode; source?: LogicSource; dialect: SqlDialect; pinned: boolean; onClose: () => void; onTogglePin: () => void; onOpenFlow: () => void }) {
   const [sqlOpen, setSqlOpen] = useState(true);
   const body = source && "definitionSql" in source ? source.definitionSql : node.kind === "unresolved" ? "This reference could not be resolved to a loaded database object." : JSON.stringify(source, null, 2);
   const routine = source && "kind" in source ? source : null;
@@ -76,6 +77,8 @@ export function LogicInspector({ node, source, pinned, onClose, onTogglePin, onO
       </InspectorMeta>
       <div className="logic-inspector-chips">{trigger.events.map((event) => <LogicOperationChip key={event} value={event} />)}</div>
     </InspectorSection>}
+    {routine && <ExplainSection targetId={`routine:${routine.id}`} input={{ kind: "routine", dialect, routine }} />}
+    {trigger && <ExplainSection targetId={`trigger:${trigger.id}`} input={{ kind: "trigger", dialect, trigger }} />}
     <InspectorSection className="sql">
       <button className="logic-inspector-sql-toggle" aria-expanded={sqlOpen} onClick={() => setSqlOpen((open) => !open)}>{sqlOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<strong>SQL statement</strong></button>
       {sqlOpen && ("definitionSql" in (source ?? {}) ? <SqlText sql={body} /> : <pre>{body}</pre>)}

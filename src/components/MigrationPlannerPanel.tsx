@@ -9,7 +9,7 @@ import { SqlText } from "./ui/SqlText";
 import { Empty, Panel } from "./ui/SidebarPrimitives";
 import { MigrationConnectionDialog } from "./MigrationConnectionDialog";
 import { introspectDatabase, type MigrationConnectionProfile, type MigrationEnvironment } from "../domain/migrationConnections";
-import { parseSchema } from "../domain/parser";
+import { parseSchemaDocument } from "../domain/schemaParser";
 import { useMigrationPlan } from "../domain/useMigrationPlan";
 import { calculateVirtualTableRange, virtualTableOffset, type VirtualTableMetrics } from "../domain/virtualTableList";
 import { MigrationSourceDialog } from "./MigrationSourceDialog";
@@ -172,7 +172,7 @@ export function MigrationPlannerPanel({ current, baseline, onChooseSource, onCho
   const chooseDatabase = async (profile: MigrationConnectionProfile, password?: string) => {
     if (!connectionRole) return;
     const result = await introspectDatabase(profile, password);
-    const snapshot = migrationSnapshotFromDocument(parseSchema(result.source, result.dialect), `db:${profile.id}`, result.sourceLabel, result.engineVersion);
+    const snapshot = migrationSnapshotFromDocument(parseSchemaDocument(result.source, result.dialect), `db:${profile.id}`, result.sourceLabel, result.engineVersion);
     const source: MigrationSource = { id: `external:db:${profile.id}:${snapshot.fingerprint}`, label: profile.name, snapshot, environment: profile.environment, detail: `${profile.environment} · ${profile.host}/${profile.database} · ${result.engineVersion}` };
     if (connectionRole === "desired") setDesiredOverride(source); else setTargetOverride(source);
     setConnectionRole(null);

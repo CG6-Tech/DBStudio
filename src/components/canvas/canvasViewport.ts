@@ -1,5 +1,5 @@
-import { BASE_GRID_SIZE, quantizeDevicePixel, zoomAround } from "../../domain/canvasGeometry";
-import { MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM } from "../../domain/viewportGeometry";
+import { BASE_GRID_SIZE, projectPoint, quantizeDevicePixel, zoomAround } from "../../domain/canvasGeometry";
+import { MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM, type ViewportBounds } from "../../domain/viewportGeometry";
 
 export interface CanvasViewport {
   x: number;
@@ -56,4 +56,28 @@ export function wheelViewport(current: CanvasViewport, wheel: CanvasWheelInput, 
 
 export function zoomViewportAtCenter(current: CanvasViewport, bounds: { width: number; height: number }, scale: number): CanvasViewport {
   return zoomAround(current, { x: bounds.width / 2, y: bounds.height / 2 }, Math.min(MAX_CANVAS_ZOOM, Math.max(MIN_CANVAS_ZOOM, scale)));
+}
+
+/** Percentages (0–1 → apply `* 100` and `%`) describing where the visible screen sits within the workspace bounds. */
+export interface MinimapViewportRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The minimap's viewport indicator rectangle, as workspace-relative fractions.
+ * Shared by the PixiJS `DiagramCanvas` (imperative, per-pan-frame) and the React
+ * `CanvasMinimap` (per-render) so the projection/clamp math lives in one place.
+ */
+export function minimapViewportRect(viewport: CanvasViewport, screen: { width: number; height: number }, bounds: ViewportBounds): MinimapViewportRect {
+  const topLeft = projectPoint({ x: -viewport.x / viewport.scale, y: -viewport.y / viewport.scale }, bounds);
+  const bottomRight = projectPoint({ x: (screen.width - viewport.x) / viewport.scale, y: (screen.height - viewport.y) / viewport.scale }, bounds);
+  return {
+    left: Math.max(0, topLeft.x),
+    top: Math.max(0, topLeft.y),
+    width: Math.max(0.03, Math.min(1, bottomRight.x) - Math.max(0, topLeft.x)),
+    height: Math.max(0.03, Math.min(1, bottomRight.y) - Math.max(0, topLeft.y)),
+  };
 }

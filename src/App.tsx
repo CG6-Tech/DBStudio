@@ -8,7 +8,7 @@ import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import { DialectWorkspaceDialog } from "./components/DialectWorkspaceDialog";
 import { WorkspaceImportDialog } from "./components/WorkspaceImportDialog";
 import { commitOperation, createDocumentPatchOperation, generateSql, operationAffectsCanvasScene, operationAffectsLayout, operationAffectsSql, operationCanvasChanges, redo, undo, type CanvasOperationChanges, type OperationState } from "./domain/operations";
-import { parseSchema } from "./domain/parser";
+import { parseSchemaDocument } from "./domain/schemaParser";
 import type { FileIdentity, OpenedDocument, SchemaDocument, SqlDialect } from "./domain/types";
 import { detectWorkspaceDialect, loadSqlWorkspace } from "./domain/workspaceLoader";
 import { mergeWorkspaceData, parseWorkspaceData, type WorkspaceMergeReport } from "./domain/workspaceData";
@@ -176,7 +176,7 @@ export function App() {
 
   const acceptOpenedDocument = useCallback(async (opened: OpenedDocument) => {
     const metadata = await loadMetadata(opened.path);
-    const parsed = metadata ? applyMetadata(parseSchema(opened.source, opened.dialect), metadata) : opened.isExample ? enrichExampleDocument(parseSchema(opened.source, opened.dialect)) : parseSchema(opened.source, opened.dialect);
+    const parsed = metadata ? applyMetadata(parseSchemaDocument(opened.source, opened.dialect), metadata) : opened.isExample ? enrichExampleDocument(parseSchemaDocument(opened.source, opened.dialect)) : parseSchemaDocument(opened.source, opened.dialect);
     if (parsed.tables.length === 0) throw new Error("No supported CREATE TABLE statements were found.");
     setHistory({ document: parsed, past: [], future: [] });
     setMigrationBaseline(parsed);
@@ -393,7 +393,7 @@ export function App() {
   const chooseMigrationFile = useCallback(async (): Promise<MigrationSource | null> => {
     const opened = await openSqlFile();
     if (!opened) return null;
-    const document = parseSchema(opened.source, opened.dialect);
+    const document = parseSchemaDocument(opened.source, opened.dialect);
     const sourceId = opened.path ?? `sql:${opened.hash}`;
     const label = documentTitle(opened);
     return {
@@ -485,7 +485,7 @@ export function App() {
         return;
       }
       await saveMetadata(desktopAvailable() ? result.path : null, document);
-      const reparsed = applyMetadata(parseSchema(candidateSql, file.dialect), {
+      const reparsed = applyMetadata(parseSchemaDocument(candidateSql, file.dialect), {
         version: 1,
         tables: document.tables.map((table) => ({ id: table.id, name: table.name, position: table.position, color: table.color, collapsed: table.collapsed, widthScale: table.widthScale, commentVisible: table.commentVisible, commentOffset: table.commentOffset, commentColor: table.commentColor })),
         areas: document.areas,
@@ -529,7 +529,7 @@ export function App() {
     }
     if (!file || dialect === file.dialect) return;
     try {
-      const parsed = applyMetadata(parseSchema(candidateSql, dialect), {
+      const parsed = applyMetadata(parseSchemaDocument(candidateSql, dialect), {
         version: 1,
         tables: document.tables.map((table) => ({ id: table.id, name: table.name, position: table.position, color: table.color, collapsed: table.collapsed, widthScale: table.widthScale, commentVisible: table.commentVisible, commentOffset: table.commentOffset, commentColor: table.commentColor })),
         areas: document.areas,

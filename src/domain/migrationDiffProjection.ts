@@ -1,4 +1,4 @@
-import type { MigrationChange, MigrationPlan, MigrationRisk } from "./migrationPlanner";
+import { isChangeKind, objectPayload, type MigrationChange, type MigrationChangePayload, type MigrationPlan, type MigrationRisk } from "./migrationPlanner";
 import type { MigrationSnapshotColumn, MigrationSnapshotObject, MigrationSnapshotTable } from "./migrationSnapshot";
 
 export type MigrationDiffState = "added" | "removed" | "modified" | "renamed" | "unchanged";
@@ -62,15 +62,19 @@ function columnSummary(column: MigrationSnapshotColumn | undefined): string | un
   return attributes.join(" · ");
 }
 
-function genericSummary(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") return value === undefined ? undefined : String(value);
-  const item = value as Record<string, unknown>;
-  if (typeof item.dataType === "string") return columnSummary(value as MigrationSnapshotColumn);
-  if (Array.isArray(item.columns)) return `${item.unique ? "UNIQUE · " : ""}${item.method ?? "btree"} (${item.columns.join(", ")})`;
-  if (typeof item.expression === "string") return item.expression;
-  if (typeof item.sourceColumn === "string") return `${item.sourceColumn} → ${item.targetTable}.${item.targetColumn}`;
-  if (typeof item.definition === "string") return item.definition.replaceAll(/\s+/g, " ").trim();
+function payloadSummary(value: MigrationChangePayload | undefined): string | undefined {
+  if (!value) return undefined;
+  if ("dataType" in value) return columnSummary(value);
+  if ("method" in value) return `${value.unique ? "UNIQUE · " : ""}${value.method ?? "btree"} (${value.columns.join(", ")})`;
+  if ("expression" in value) return value.expression;
+  if ("sourceColumn" in value) return `${value.sourceColumn} → ${value.targetTable}.${value.targetColumn}`;
+  if ("definition" in value) return value.definition.replaceAll(/\s+/g, " ").trim();
   return undefined;
+}
+
+/** The display name of a payload, if it carries one (foreign keys are keyed, not named). */
+function payloadName(value: MigrationChangePayload | undefined): string | undefined {
+  return value && "name" in value ? value.name : undefined;
 }
 
 function stateForChange(change: MigrationChange): MigrationDiffState {
@@ -81,10 +85,10 @@ function stateForChange(change: MigrationChange): MigrationDiffState {
 }
 
 function labelForChange(change: MigrationChange): string {
-  const after = change.after as { name?: string } | undefined;
-  const before = change.before as { name?: string } | undefined;
-  if (change.kind.startsWith("rename-") && before?.name && after?.name) return `${before.name} → ${after.name}`;
-  if (after?.name || before?.name) return after?.name ?? before!.name!;
+  const before = payloadName("before" in change ? change.before : undefined);
+  const after = payloadName("after" in change ? change.after : undefined);
+  if (change.kind.startsWith("rename-") && before && after) return `${before} → ${after}`;
+  if (after || before) return after ?? before!;
   const normalized = change.objectKey.replace(/:(replace|replacement)$/, "");
   return normalized.split(".").at(-1) ?? normalized;
 }
@@ -95,8 +99,8 @@ function rowForChange(change: MigrationChange): MigrationDiffRow {
     changeId: change.id,
     kind: change.objectKind,
     label: labelForChange(change),
-    before: genericSummary(change.before),
-    after: genericSummary(change.after),
+    before: payloadSummary("before" in change ? change.before : undefined),
+    after: payloadSummary("after" in change ? change.after : undefined),
     state: stateForChange(change),
     risk: change.risk,
   };
@@ -117,10 +121,10 @@ function unchangedColumnRows(desired: MigrationSnapshotTable | undefined, target
   if (!desired || !target) return [];
   const changedNames = new Set<string>();
   changes.forEach((change) => {
-    const before = change.before as { name?: string } | undefined;
-    const after = change.after as { name?: string } | undefined;
-    if (before?.name) changedNames.add(before.name.toLocaleLowerCase("en"));
-    if (after?.name) changedNames.add(after.name.toLocaleLowerCase("en"));
+    const before = payloadName("before" in change ? change.before : undefined);
+    const after = payloadName("after" in change ? change.after : undefined);
+    if (before) changedNames.add(before.toLocaleLowerCase("en"));
+    if (after) changedNames.add(after.toLocaleLowerCase("en"));
   });
   const targetByKey = new Map(target.columns.map((column) => [column.key, column]));
   return desired.columns.flatMap((column) => {
@@ -172,17 +176,15 @@ export function projectMigrationDiff(plan: MigrationPlan): MigrationDiffProjecti
   const targetTables = new Map(plan.target.tables.map((table) => [table.key, table]));
   const renamedTargetKeys = new Set<string>();
   const renamedTargetByDesired = new Map<string, MigrationSnapshotTable>();
-  plan.changes.filter((change) => change.kind === "rename-table").forEach((change) => {
-    const before = change.before as MigrationSnapshotTable;
-    const after = change.after as MigrationSnapshotTable;
-    renamedTargetKeys.add(before.key);
-    renamedTargetByDesired.set(after.key, before);
+  plan.changes.filter(isChangeKind("rename-table")).forEach((change) => {
+    renamedTargetKeys.add(change.before.key);
+    renamedTargetByDesired.set(change.after.key, change.before);
   });
   const tableKeys = [...new Set([...desiredTables.keys(), ...targetTables.keys()].filter((key) => !renamedTargetKeys.has(key)))];
   const cards = tableKeys.map((key) => tableCard(plan, key, desiredTables.get(key), renamedTargetByDesired.get(key) ?? targetTables.get(key)));
-  plan.changes.filter((change) => change.objectKind === "type" || change.objectKind === "routine" || change.objectKind === "trigger").forEach((change) => {
-    const object = (change.after ?? change.before) as MigrationSnapshotObject;
-    cards.push(objectCard(change, object));
+  plan.changes.forEach((change) => {
+    const object = objectPayload(change);
+    if (object) cards.push(objectCard(change, object));
   });
   cards.sort((left, right) => laneRank[left.lane] - laneRank[right.lane] || left.key.localeCompare(right.key));
 
@@ -192,11 +194,12 @@ export function projectMigrationDiff(plan: MigrationPlan): MigrationDiffProjecti
   cards.forEach((card) => card.changeIds.forEach((changeId) => cardIdByChangeId.set(changeId, card.id)));
   const changeById = new Map(plan.changes.map((change) => [change.id, change]));
   const edges = plan.changes.flatMap((change): MigrationDiffEdge[] => {
-    const object = (change.after ?? change.before) as { targetTable?: string };
+    const payload = ("after" in change ? change.after : undefined) ?? ("before" in change ? change.before : undefined);
+    const targetTable = payload && "targetTable" in payload ? payload.targetTable : undefined;
     const sourceKey = change.objectKind === "foreign-key" ? change.tableKey : change.objectKind === "trigger" ? change.objectKey : undefined;
-    if (!sourceKey || !object.targetTable) return [];
+    if (!sourceKey || !targetTable) return [];
     const sourceCardId = cardIdByKey.get(sourceKey);
-    const targetCardId = cardIdByKey.get(object.targetTable);
+    const targetCardId = cardIdByKey.get(targetTable);
     if (!sourceCardId || !targetCardId) return [];
     return [{ id: `migration-edge:${change.id}`, changeId: change.id, sourceCardId, targetCardId, state: stateForChange(change), risk: change.risk }];
   });

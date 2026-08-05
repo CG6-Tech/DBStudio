@@ -1,7 +1,10 @@
 import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { isBetaExpired } from "./platform/betaExpiry";
+import { registerConnectors } from "./domain/registerConnectors";
 import "./styles.css";
+
+registerConnectors();
 
 const marketingRoute = window.location.pathname === "/marketing" || window.location.pathname === "/marketing/";
 const desktopAuthRoute = window.location.pathname === "/desktop-auth" || window.location.pathname === "/desktop-auth/";

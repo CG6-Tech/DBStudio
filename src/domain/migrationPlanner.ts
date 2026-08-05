@@ -1,13 +1,22 @@
-import { stableHash, type MigrationSnapshot, type MigrationSnapshotColumn, type MigrationSnapshotObject, type MigrationSnapshotTable } from "./migrationSnapshot";
+import { stableHash, type MigrationSnapshot, type MigrationSnapshotColumn, type MigrationSnapshotForeignKey, type MigrationSnapshotIndex, type MigrationSnapshotObject, type MigrationSnapshotTable } from "./migrationSnapshot";
 import { stableDependencyOrder } from "./dependencyGraph";
 
 export type MigrationStrategy = "standard" | "low-lock" | "expand-contract";
 export type MigrationRisk = "safe" | "review" | "blocked";
+export type MigrationPhase = "expand" | "migrate" | "contract";
+export type MigrationObjectKind = "type" | "routine" | "trigger";
 export type MigrationChangeKind =
   | "create-table" | "drop-table" | "rename-table"
   | "add-column" | "drop-column" | "rename-column" | "alter-column"
   | "create-index" | "drop-index" | "add-foreign-key" | "drop-foreign-key" | "add-check" | "drop-check"
   | "create-object" | "drop-object" | "replace-object";
+
+/** A CHECK constraint as it appears on a snapshot table. */
+export type MigrationSnapshotCheck = MigrationSnapshotTable["checks"][number];
+/** Every shape that can appear in a change's `before`/`after` slot. */
+export type MigrationChangePayload =
+  | MigrationSnapshotTable | MigrationSnapshotColumn | MigrationSnapshotIndex
+  | MigrationSnapshotForeignKey | MigrationSnapshotCheck | MigrationSnapshotObject;
 
 export interface MigrationRenameSuggestion {
   id: string;
@@ -19,19 +28,52 @@ export interface MigrationRenameSuggestion {
   reasons: string[];
 }
 
-export interface MigrationChange {
+/** Fields shared by every change, regardless of kind. */
+interface MigrationChangeBase {
   id: string;
-  kind: MigrationChangeKind;
-  objectKind: "table" | "column" | "index" | "foreign-key" | "check" | "type" | "routine" | "trigger";
   objectKey: string;
   tableKey?: string;
-  before?: unknown;
-  after?: unknown;
   risk: MigrationRisk;
   reason: string;
   dependsOn: string[];
-  phase: "expand" | "migrate" | "contract";
+  phase: MigrationPhase;
   reversible: boolean;
+}
+
+/**
+ * A single migration step. Discriminated on `kind` so that `before`/`after`
+ * carry the exact snapshot shape for that step — narrowing on `change.kind`
+ * (as `migrationSql`/`migrationRequirements` do) types the payload with no cast.
+ */
+export type MigrationChange = MigrationChangeBase & (
+  | { kind: "create-table"; objectKind: "table"; after: MigrationSnapshotTable; before?: never }
+  | { kind: "drop-table"; objectKind: "table"; before: MigrationSnapshotTable; after?: never }
+  | { kind: "rename-table"; objectKind: "table"; before: MigrationSnapshotTable; after: MigrationSnapshotTable }
+  | { kind: "add-column"; objectKind: "column"; after: MigrationSnapshotColumn; before?: never }
+  | { kind: "drop-column"; objectKind: "column"; before: MigrationSnapshotColumn; after?: never }
+  | { kind: "rename-column"; objectKind: "column"; before: MigrationSnapshotColumn; after: MigrationSnapshotColumn }
+  | { kind: "alter-column"; objectKind: "column"; before: MigrationSnapshotColumn; after: MigrationSnapshotColumn }
+  | { kind: "create-index"; objectKind: "index"; after: MigrationSnapshotIndex; before?: never }
+  | { kind: "drop-index"; objectKind: "index"; before: MigrationSnapshotIndex; after?: never }
+  | { kind: "add-foreign-key"; objectKind: "foreign-key"; after: MigrationSnapshotForeignKey; before?: never }
+  | { kind: "drop-foreign-key"; objectKind: "foreign-key"; before: MigrationSnapshotForeignKey; after?: never }
+  | { kind: "add-check"; objectKind: "check"; after: MigrationSnapshotCheck; before?: never }
+  | { kind: "drop-check"; objectKind: "check"; before: MigrationSnapshotCheck; after?: never }
+  | { kind: "create-object"; objectKind: MigrationObjectKind; after: MigrationSnapshotObject; before?: never }
+  | { kind: "replace-object"; objectKind: MigrationObjectKind; before: MigrationSnapshotObject; after: MigrationSnapshotObject }
+  | { kind: "drop-object"; objectKind: MigrationObjectKind; before: MigrationSnapshotObject; after?: never }
+);
+
+/** Narrowing filter: `changes.filter(isChangeKind("rename-table"))` yields the matching union member. */
+export function isChangeKind<K extends MigrationChangeKind>(kind: K) {
+  return (change: MigrationChange): change is Extract<MigrationChange, { kind: K }> => change.kind === kind;
+}
+
+/** The migration object a change creates, replaces, or drops, if it is an object change. */
+export function objectPayload(change: MigrationChange): MigrationSnapshotObject | undefined {
+  if (change.kind === "create-object" || change.kind === "replace-object") return change.after;
+  if (change.kind === "drop-object") return change.before;
+  return undefined;
 }
 
 export interface MigrationPlan {
@@ -222,7 +264,14 @@ function columnRenameSuggestions(tableKey: string, desired: MigrationSnapshotCol
   });
 }
 
-function change(kind: MigrationChangeKind, objectKind: MigrationChange["objectKind"], objectKey: string, values: Partial<MigrationChange>): MigrationChange {
+/** Fields a caller may override or supply when constructing a change. */
+type MigrationChangeInput = Partial<Pick<MigrationChangeBase, "risk" | "reason" | "dependsOn" | "phase" | "reversible" | "tableKey">>
+  & { before?: MigrationChangePayload; after?: MigrationChangePayload };
+
+// The concrete kind → payload pairing is chosen at runtime (e.g. in `compareNamed`),
+// so this factory is the one place that asserts the discriminated union. Every reader
+// narrows on `kind` and stays cast-free.
+function change(kind: MigrationChangeKind, objectKind: MigrationChange["objectKind"], objectKey: string, values: MigrationChangeInput): MigrationChange {
   return {
     id: `change:${stableHash(`${kind}:${objectKind}:${objectKey}`)}`,
     kind,
@@ -234,7 +283,7 @@ function change(kind: MigrationChangeKind, objectKind: MigrationChange["objectKi
     phase: kind.startsWith("drop") ? "contract" : "expand",
     reversible: !kind.startsWith("drop"),
     ...values,
-  };
+  } as MigrationChange;
 }
 
 function riskForColumn(before: MigrationSnapshotColumn, after: MigrationSnapshotColumn): { risk: MigrationRisk; reason: string } {
@@ -270,7 +319,7 @@ function compareTable(desired: MigrationSnapshotTable, target: MigrationSnapshot
     changes.push(change("alter-column", "column", `${desired.key}.${after.name}`, { tableKey: desired.key, before, after, ...risk, phase: "migrate" }));
   });
 
-  const compareNamed = <T extends { key: string; fingerprint: string }>(desiredItems: T[], targetItems: T[], objectKind: "index" | "foreign-key" | "check", createKind: "create-index" | "add-foreign-key" | "add-check", dropKind: "drop-index" | "drop-foreign-key" | "drop-check") => {
+  const compareNamed = <T extends MigrationChangePayload & { key: string; fingerprint: string }>(desiredItems: T[], targetItems: T[], objectKind: "index" | "foreign-key" | "check", createKind: "create-index" | "add-foreign-key" | "add-check", dropKind: "drop-index" | "drop-foreign-key" | "drop-check") => {
     const desiredByKey = new Map(desiredItems.map((item) => [item.key, item]));
     const targetByKey = new Map(targetItems.map((item) => [item.key, item]));
     desiredItems.forEach((item) => {
@@ -305,8 +354,8 @@ function orderChanges(changes: MigrationChange[]): MigrationChange[] {
     "drop-check": 11, "drop-index": 12, "drop-column": 13, "drop-object": 14, "drop-table": 15,
   };
   const byId = new Map(changes.map((item) => [item.id, item]));
-  const createTableByKey = new Map(changes.filter((item) => item.kind === "create-table").map((item) => [item.objectKey, item]));
-  const dropForeignKeys = changes.filter((item) => item.kind === "drop-foreign-key");
+  const createTableByKey = new Map(changes.filter(isChangeKind("create-table")).map((item) => [item.objectKey, item]));
+  const dropForeignKeys = changes.filter(isChangeKind("drop-foreign-key"));
   changes.forEach((item) => {
     const dependencies = new Set(item.dependsOn);
     if (["add-column", "create-index", "add-foreign-key"].includes(item.kind) && item.tableKey) {
@@ -314,14 +363,12 @@ function orderChanges(changes: MigrationChange[]): MigrationChange[] {
       if (createTable) dependencies.add(createTable.id);
     }
     if (item.kind === "add-foreign-key") {
-      const targetTable = (item.after as { targetTable?: string } | undefined)?.targetTable;
-      const targetCreate = targetTable ? createTableByKey.get(targetTable) : undefined;
+      const targetCreate = createTableByKey.get(item.after.targetTable);
       if (targetCreate) dependencies.add(targetCreate.id);
     }
     if (item.kind === "drop-table") {
       dropForeignKeys.forEach((foreignKey) => {
-        const targetTable = (foreignKey.before as { targetTable?: string } | undefined)?.targetTable;
-        if (foreignKey.tableKey === item.objectKey || targetTable === item.objectKey) dependencies.add(foreignKey.id);
+        if (foreignKey.tableKey === item.objectKey || foreignKey.before.targetTable === item.objectKey) dependencies.add(foreignKey.id);
       });
     }
     item.dependsOn = [...dependencies].filter((id) => byId.has(id)).sort();

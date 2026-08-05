@@ -4,12 +4,20 @@ import type { Plugin } from "vite";
 import { scanDevelopmentWorkspace } from "./dev/workspaceFixture";
 
 const host = process.env.TAURI_DEV_HOST;
-const developmentWorkspaceRoot = "/Users/cg/Downloads/chartdb-folder-test";
+// Optional local folder of .sql files loaded by the dev-only "development workspace"
+// shortcut. Point DBSTUDIO_DEV_WORKSPACE at a directory to enable it; when unset the
+// middleware reports that it is not configured rather than reading a hardcoded path.
+const developmentWorkspaceRoot = process.env.DBSTUDIO_DEV_WORKSPACE?.trim();
 
 function developmentWorkspacePlugin(): Plugin {
   return { name: "dbstudio-development-workspace", apply: "serve", configureServer(server) {
     server.middlewares.use("/__viewdb/development-workspace", async (_request, response) => {
       response.setHeader("Content-Type", "application/json; charset=utf-8"); response.setHeader("Cache-Control", "no-store");
+      if (!developmentWorkspaceRoot) {
+        response.statusCode = 404;
+        response.end(JSON.stringify({ error: "Set DBSTUDIO_DEV_WORKSPACE to a folder of .sql files to use the development workspace shortcut." }));
+        return;
+      }
       try { response.statusCode = 200; response.end(JSON.stringify(await scanDevelopmentWorkspace(developmentWorkspaceRoot))); }
       catch (error) { response.statusCode = 404; response.end(JSON.stringify({ error: error instanceof Error ? error.message : "The development workspace fixture could not be loaded." })); }
     });

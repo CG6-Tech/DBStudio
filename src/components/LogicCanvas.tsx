@@ -6,6 +6,8 @@ import type { DatabaseTrigger, Routine, SchemaDocument, Table } from "../domain/
 import { MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM } from "../domain/viewportGeometry";
 import type { LogicLayoutRequest, LogicLayoutResponse } from "../layout/logic-layout.worker";
 import { useUiStore } from "../state/uiStore";
+import { useAiStore } from "../state/aiStore";
+import { AiSettingsDialog } from "./ai/AiSettingsDialog";
 import { LogicFlowBlock } from "./flow/LogicFlowBlock";
 import { flowPortKey, useFlowGeometry } from "./flow/useFlowGeometry";
 import { parallelFlowEdgeIndexes, routeFlowConnection } from "../layout/flowRouting";
@@ -28,6 +30,8 @@ export function LogicCanvas({ document, onLayoutChange }: { document: SchemaDocu
   const setZoom = useUiStore((state) => state.setZoom);
   const minimapVisible = useUiStore((state) => state.minimapVisible);
   const toggleMinimap = useUiStore((state) => state.toggleMinimap);
+  const settingsOpen = useAiStore((state) => state.settingsOpen);
+  const closeSettings = useAiStore((state) => state.closeSettings);
   const graph = useMemo(() => projectLogicGraph(document), [document.tables, document.triggers, document.routines, document.logicEdges]);
   const automatic = useMemo(() => automaticLogicPositions(graph.nodes, graph.edges), [graph]);
   const [positions, setPositions] = useState(() => reconcileLogicPositions(automatic, document.logicLayout?.nodes));
@@ -112,6 +116,7 @@ export function LogicCanvas({ document, onLayoutChange }: { document: SchemaDocu
       { title: "Toggle minimap", onClick: toggleMinimap, pressed: minimapVisible, icon: <MapIcon size={17} /> },
     ]} />
     {minimapVisible && <LogicGraphMinimap nodes={graph.nodes} positions={positions} bounds={graphBounds} viewport={viewport} host={canvas.hostRef.current} onCenter={centerOnMinimap} />}
-    {selectedNode && <LogicInspector node={selectedNode} source={selectedSource} pinned={pinned.has(selectedNode.id)} onClose={() => setSelected(null)} onTogglePin={() => togglePin(selectedNode.id)} onOpenFlow={() => openFlow(selectedNode.id)} />}
+    {selectedNode && <LogicInspector node={selectedNode} source={selectedSource} dialect={document.dialect} pinned={pinned.has(selectedNode.id)} onClose={() => setSelected(null)} onTogglePin={() => togglePin(selectedNode.id)} onOpenFlow={() => openFlow(selectedNode.id)} />}
+    {settingsOpen && <AiSettingsDialog onClose={closeSettings} />}
   </div>;
 }

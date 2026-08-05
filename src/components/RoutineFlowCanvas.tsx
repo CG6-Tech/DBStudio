@@ -5,7 +5,7 @@ import { FLOW_NODE_WIDTH, flowNodeHeight } from "../domain/flowGeometry";
 import { layoutRoutineFlow } from "../domain/flowLayout";
 import { parseRoutineFlow } from "../domain/routineFlow";
 import type { RoutineFlow, RoutineFlowNode } from "../domain/routineFlow";
-import type { SchemaDocument } from "../domain/types";
+import type { SchemaDocument, SqlDialect } from "../domain/types";
 import { MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM } from "../domain/viewportGeometry";
 import { useUiStore } from "../state/uiStore";
 import { CanvasControlToolbar } from "./CanvasToolbar";
@@ -19,6 +19,9 @@ import { RoutineFlowNodeIcon } from "./flow/RoutineFlowIcons";
 import { useFlowGeometry } from "./flow/useFlowGeometry";
 import { InspectorActions, InspectorMeta, InspectorMetaRow, InspectorSection, InspectorShell, InspectorTitle } from "./ui/InspectorPrimitives";
 import { SqlText } from "./ui/SqlText";
+import { ExplainSection } from "./ai/ExplainSection";
+import { AiSettingsDialog } from "./ai/AiSettingsDialog";
+import { useAiStore } from "../state/aiStore";
 
 const cache = new Map<string, ReturnType<typeof parseRoutineFlow>>();
 const ROUTINE_FLOW_ALGORITHM_VERSION = 10;
@@ -45,7 +48,7 @@ function routineFlowConnected(flow: RoutineFlow, nodeId: string): { nodes: Set<s
   return { nodes, edges };
 }
 
-function RoutineFlowInspector({ node, pinned, onClose, onTogglePin }: { node: RoutineFlowNode; pinned: boolean; onClose: () => void; onTogglePin: () => void }) {
+function RoutineFlowInspector({ node, dialect, routineName, pinned, onClose, onTogglePin }: { node: RoutineFlowNode; dialect: SqlDialect; routineName: string; pinned: boolean; onClose: () => void; onTogglePin: () => void }) {
   const source = node.source || "Generated branch merge";
   return <InspectorShell className="routine-flow-inspector" onClose={onClose}>
     <InspectorTitle className={`routine-node-title ${node.kind}`} icon={<RoutineFlowNodeIcon kind={node.kind} />} eyebrow={node.kind.toUpperCase()} title={node.title} />
@@ -71,6 +74,7 @@ function RoutineFlowInspector({ node, pinned, onClose, onTogglePin }: { node: Ro
       <button className="logic-inspector-sql-toggle" aria-expanded="true"><Code2 size={13} /><strong>SQL statement</strong></button>
       <SqlText sql={source} />
     </InspectorSection>}
+    <ExplainSection targetId={`flow-node:${routineName}:${node.id}`} input={{ kind: "flow-node", dialect, routineName, node }} />
   </InspectorShell>;
 }
 
@@ -138,6 +142,13 @@ export function RoutineFlowCanvas({ document, routineId, onLayoutChange }: { doc
       {minimapVisible && <CanvasMinimap className="routine-flow-overview" label="Routine flow minimap" nodes={minimapNodes} bounds={flowBounds} viewport={viewport} host={canvas.hostRef.current} onCenter={centerOnMinimap} />}
       {flow.diagnostics.length > 0 && <div className="routine-flow-warning">⚠ {flow.diagnostics.length} parser warning{flow.diagnostics.length === 1 ? "" : "s"}</div>}
     </div>
-    {selected && <RoutineFlowInspector node={selected} pinned={pinned.has(selected.id)} onClose={() => setSelectedId(null)} onTogglePin={() => togglePin(selected.id)} />}
+    {selected && <RoutineFlowInspector node={selected} dialect={document.dialect} routineName={routine.name} pinned={pinned.has(selected.id)} onClose={() => setSelectedId(null)} onTogglePin={() => togglePin(selected.id)} />}
+    <RoutineFlowSettingsMount />
   </div>;
+}
+
+function RoutineFlowSettingsMount() {
+  const settingsOpen = useAiStore((state) => state.settingsOpen);
+  const closeSettings = useAiStore((state) => state.closeSettings);
+  return settingsOpen ? <AiSettingsDialog onClose={closeSettings} /> : null;
 }

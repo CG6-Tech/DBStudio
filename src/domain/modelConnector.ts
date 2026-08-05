@@ -1,4 +1,4 @@
-import { aiComplete } from "../platform/aiSecrets";
+import { runAgentCli } from "../platform/agentCli";
 
 /**
  * The model-connector seam.
@@ -8,9 +8,11 @@ import { aiComplete } from "../platform/aiSecrets";
  * runs completions through {@link runCompletion} rather than importing a
  * connector directly.
  *
- * Connectors only shape the request/response for their wire format; the actual
- * HTTP call and API-key handling happen in Rust (via {@link ModelConnectorBoundary}),
- * so the key never enters the webview.
+ * A connector drives a locally installed agent CLI (Claude Code, Codex) that the
+ * user has already authenticated. DBStudio manages no API keys: it flattens the
+ * request into a single prompt, hands it to the CLI via {@link ModelConnectorBoundary},
+ * and returns the reply. The boundary is injectable so connectors are unit-testable
+ * without spawning a process — copies the pattern in {@link ../platform/updater}.
  */
 
 export interface ChatMessage {
@@ -27,38 +29,34 @@ export interface CompletionRequest {
 
 export interface CompletionResult {
   text: string;
-  model: string;
-  stopReason?: string;
+  agentId: string;
 }
 
 /**
- * The native side of a completion: POST a pre-built body to `endpoint` and
- * return the raw response text. Injectable so connectors are unit-testable with
- * a fake boundary (no network) — copies the pattern in {@link ../platform/updater}.
+ * The native side of a completion: run an agent CLI with `prompt` on stdin and
+ * return its reply text. Injectable for tests (no process spawn).
  */
 export interface ModelConnectorBoundary {
-  complete: (providerId: string, endpoint: string, body: unknown) => Promise<string>;
+  run: (agentId: string, prompt: string) => Promise<string>;
 }
 
-/** Default boundary — delegates to the Rust `ai_complete` command. */
+/** Default boundary — delegates to the Rust `run_agent_cli` command. */
 export const nativeModelBoundary: ModelConnectorBoundary = {
-  complete: aiComplete,
+  run: runAgentCli,
 };
 
 export interface ModelConnector {
-  /** Stable provider id — also the Keychain account for the stored key. */
+  /** Stable agent id — also the CLI binary name ("claude" | "codex"). */
   readonly id: string;
   /** Human-readable label for settings UI. */
   readonly label: string;
-  /** Selectable model ids; the first is the default. */
-  readonly models: string[];
   /**
-   * Run a completion. Implementations build the provider-specific body, call
-   * `boundary.complete`, and parse the response into a {@link CompletionResult}.
+   * Run a completion by flattening the request into a prompt, invoking the CLI
+   * through `boundary.run`, and returning the reply.
    */
   complete(
     request: CompletionRequest,
-    options: { model: string; boundary?: ModelConnectorBoundary },
+    options?: { boundary?: ModelConnectorBoundary },
   ): Promise<CompletionResult>;
 }
 
@@ -66,7 +64,20 @@ const registry = new Map<string, ModelConnector>();
 let activeConnectorId: string | null = null;
 
 const ACTIVE_STORAGE_KEY = "dbstudio.ai.activeConnector.v1";
-const MODEL_STORAGE_KEY = "dbstudio.ai.activeModel.v1";
+
+/**
+ * Flatten a request into a single prompt string for a CLI agent. System prompt
+ * first, then the conversation turns. Shared by all CLI connectors.
+ */
+export function flattenPrompt(request: CompletionRequest): string {
+  const parts: string[] = [];
+  if (request.system.trim()) parts.push(request.system.trim());
+  for (const message of request.messages) {
+    if (message.role === "system") continue;
+    parts.push(message.content.trim());
+  }
+  return parts.join("\n\n");
+}
 
 /** Register (or replace) a connector. */
 export function registerModelConnector(connector: ModelConnector): void {
@@ -110,22 +121,9 @@ export function getActiveConnector(): ModelConnector | undefined {
   return id ? registry.get(id) : undefined;
 }
 
-/** The chosen model for the active provider, defaulting to its first model. */
-export function getActiveModel(connector = getActiveConnector()): string | undefined {
-  if (!connector) return undefined;
-  const stored = safeGet(`${MODEL_STORAGE_KEY}.${connector.id}`);
-  if (stored && connector.models.includes(stored)) return stored;
-  return connector.models[0];
-}
-
-/** Set the chosen model for a provider, persisting per-provider. */
-export function setActiveModel(providerId: string, model: string): void {
-  safeSet(`${MODEL_STORAGE_KEY}.${providerId}`, model);
-}
-
 /**
  * Production entry point: run a completion through the active connector.
- * Throws a user-facing error when no provider is configured.
+ * Throws a user-facing error when no agent is selected.
  */
 export async function runCompletion(
   request: CompletionRequest,
@@ -133,11 +131,9 @@ export async function runCompletion(
 ): Promise<CompletionResult> {
   const connector = getActiveConnector();
   if (!connector) {
-    throw new Error("No AI provider is configured. Open AI settings to add one.");
+    throw new Error("No AI agent is selected. Open AI settings to choose Claude Code or Codex.");
   }
-  const model = getActiveModel(connector);
-  if (!model) throw new Error(`The provider ${connector.label} has no available models.`);
-  return connector.complete(request, { model, boundary: options.boundary });
+  return connector.complete(request, { boundary: options.boundary });
 }
 
 function safeGet(key: string): string | null {

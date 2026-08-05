@@ -1,6 +1,5 @@
 import { registerModelConnector } from "./modelConnector";
-import { anthropicConnector } from "./connectors/anthropic";
-import { openaiConnector } from "./connectors/openai";
+import { claudeCodeConnector, codexConnector } from "./connectors/agentConnectors";
 import { registerExplainRoutineSkill } from "./skills/explainRoutine";
 
 /**
@@ -13,7 +12,7 @@ let registered = false;
 export function registerConnectors(): void {
   if (registered) return;
   registered = true;
-  registerModelConnector(anthropicConnector);
-  registerModelConnector(openaiConnector);
+  registerModelConnector(claudeCodeConnector);
+  registerModelConnector(codexConnector);
   registerExplainRoutineSkill();
 }

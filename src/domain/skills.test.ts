@@ -12,8 +12,7 @@ function fakeConnector(reply: string): ModelConnector {
   return {
     id: "fake",
     label: "Fake",
-    models: ["fake-1"],
-    complete: vi.fn(async () => ({ text: reply, model: "fake-1" })),
+    complete: vi.fn(async () => ({ text: reply, agentId: "fake" })),
   };
 }
 
@@ -46,7 +45,7 @@ describe("skills registry", () => {
 
   it("throws when no connector is configured", async () => {
     registerSkill(echoSkill);
-    await expect(runSkill("echo", { value: "hi" })).rejects.toThrow(/No AI provider/);
+    await expect(runSkill("echo", { value: "hi" })).rejects.toThrow(/No AI agent/);
   });
 });
 

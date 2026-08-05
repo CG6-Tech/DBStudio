@@ -1,103 +1,121 @@
-use std::time::Duration;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
-const KEYCHAIN_SERVICE: &str = "com.dbstudio.ai-providers";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-
-#[cfg(target_os = "macos")]
-fn ai_key(provider_id: &str) -> Result<String, String> {
-    let bytes = security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, provider_id)
-        .map_err(|_| "No API key is stored for this provider. Open AI settings and enter it again.".to_string())?;
-    String::from_utf8(bytes).map_err(|_| "The stored API key is invalid UTF-8.".to_string())
+/// Which local agent CLI to invoke. The prompt is passed on stdin so no schema
+/// content ever lands in argv (safe for large prompts and shell-sensitive text).
+///
+/// DBStudio does NOT manage credentials: it relies on the CLI the user has
+/// already installed and authenticated (`claude` = Claude Code, `codex` = Codex).
+/// This keeps keys out of the app entirely — no Keychain, no HTTP, no CSP.
+#[derive(Debug)]
+struct AgentInvocation {
+    program: String,
+    args: Vec<String>,
 }
 
-#[cfg(not(target_os = "macos"))]
-fn ai_key(_provider_id: &str) -> Result<String, String> {
-    Err("Secure API key storage is only available in the macOS app.".to_string())
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub(crate) fn save_ai_secret(provider_id: String, api_key: String) -> Result<(), String> {
-    if provider_id.trim().is_empty() || api_key.is_empty() {
-        return Err("A provider and API key are required.".to_string());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        security_framework::passwords::set_generic_password(KEYCHAIN_SERVICE, &provider_id, api_key.as_bytes())
-            .map_err(|error| format!("Could not store the API key in macOS Keychain: {error}"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = api_key;
-        Err("Secure API key storage is only available in the macOS app.".to_string())
+fn invocation_for(agent_id: &str, program_override: Option<String>) -> Result<AgentInvocation, String> {
+    match agent_id {
+        // `claude -p` reads the prompt from stdin when none is given as an arg,
+        // and emits a JSON envelope whose `.result` holds the reply text.
+        "claude" => Ok(AgentInvocation {
+            program: program_override.unwrap_or_else(|| "claude".to_string()),
+            args: vec!["-p".into(), "--output-format".into(), "json".into()],
+        }),
+        // `codex exec` reads the prompt from stdin; --skip-git-repo-check avoids
+        // the trusted-directory gate. The reply is captured via the events on
+        // stdout (the final "codex" message).
+        "codex" => Ok(AgentInvocation {
+            program: program_override.unwrap_or_else(|| "codex".to_string()),
+            args: vec!["exec".into(), "--skip-git-repo-check".into(), "-".into()],
+        }),
+        other => Err(format!("Unknown AI agent: {other}")),
     }
 }
 
-#[tauri::command(rename_all = "camelCase")]
-pub(crate) fn delete_ai_secret(provider_id: String) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        match security_framework::passwords::delete_generic_password(KEYCHAIN_SERVICE, &provider_id) {
-            Ok(()) => Ok(()),
-            Err(_) => Ok(()),
+/// Extract the reply text from an agent's stdout.
+fn extract_reply(agent_id: &str, stdout: &str) -> Result<String, String> {
+    match agent_id {
+        "claude" => {
+            let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+                .map_err(|error| format!("Could not parse Claude Code output: {error}"))?;
+            if parsed.get("is_error").and_then(|value| value.as_bool()).unwrap_or(false) {
+                return Err(parsed.get("result").and_then(|value| value.as_str()).unwrap_or("Claude Code reported an error.").to_string());
+            }
+            Ok(parsed.get("result").and_then(|value| value.as_str()).unwrap_or_default().trim().to_string())
         }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = provider_id;
-        Ok(())
-    }
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub(crate) fn has_ai_secret(provider_id: String) -> Result<bool, String> {
-    #[cfg(target_os = "macos")]
-    {
-        Ok(security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, &provider_id).is_ok())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = provider_id;
-        Ok(false)
+        // Codex exec prints human-readable events; the reply follows the final
+        // "codex" marker line. Fall back to the whole trimmed stdout.
+        "codex" => {
+            if let Some(index) = stdout.rfind("\ncodex\n") {
+                let tail = stdout[index + "\ncodex\n".len()..].trim();
+                let cleaned: Vec<&str> = tail
+                    .lines()
+                    .take_while(|line| !line.starts_with("tokens used") && !line.starts_with("hook:"))
+                    .collect();
+                return Ok(cleaned.join("\n").trim().to_string());
+            }
+            Ok(stdout.trim().to_string())
+        }
+        other => Err(format!("Unknown AI agent: {other}")),
     }
 }
 
-/// Auth header style differs per provider; the request/response bodies are shaped
-/// entirely in the TypeScript connector. This command only attaches the stored
-/// key with the right headers, POSTs the pre-built body, and returns the raw
-/// response text for the connector to parse. Keeping the key here means it never
-/// enters the webview and no CSP allowlist is required (the call runs in Rust).
+/// Run a local agent CLI headlessly with `prompt` on stdin and return its reply.
+///
+/// `agent_id` is "claude" or "codex". `program_override` lets callers point at a
+/// non-PATH binary. Runs synchronously on Tauri's worker thread (like the
+/// blocking DB introspection command), so a slow model does not block the UI.
 #[tauri::command(rename_all = "camelCase")]
-pub(crate) fn ai_complete(
-    provider_id: String,
-    endpoint: String,
-    body: serde_json::Value,
+pub(crate) fn run_agent_cli(
+    agent_id: String,
+    prompt: String,
+    program_override: Option<String>,
+    timeout_secs: Option<u64>,
 ) -> Result<String, String> {
-    if endpoint.trim().is_empty() {
-        return Err("An AI endpoint is required.".to_string());
-    }
-    let key = ai_key(&provider_id)?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|error| format!("Could not initialize the AI HTTP client: {error}"))?;
+    let invocation = invocation_for(&agent_id, program_override)?;
+    let _ = timeout_secs; // reserved for a future wall-clock guard
 
-    let mut request = client.post(&endpoint).json(&body);
-    request = match provider_id.as_str() {
-        "anthropic" => request
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01"),
-        _ => request.header("authorization", format!("Bearer {key}")),
+    let mut child = Command::new(&invocation.program)
+        .args(&invocation.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Could not start '{}'. Is it installed and on your PATH? ({error})", invocation.program))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|error| format!("Could not send the prompt to {}: {error}", invocation.program))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("The agent '{}' did not complete: {error}", invocation.program))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("{} exited with {}: {}", invocation.program, output.status, stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    extract_reply(&agent_id, &stdout)
+}
+
+/// Report whether an agent CLI is available on PATH (or at an override path).
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) fn agent_cli_available(agent_id: String, program_override: Option<String>) -> bool {
+    let invocation = match invocation_for(&agent_id, program_override) {
+        Ok(value) => value,
+        Err(_) => return false,
     };
-
-    let response = request
-        .send()
-        .map_err(|error| format!("Could not reach the AI provider: {error}"))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .map_err(|error| format!("Could not read the AI provider response: {error}"))?;
-    if !status.is_success() {
-        return Err(format!("The AI provider returned {status}: {text}"));
-    }
-    Ok(text)
+    Command::new(&invocation.program)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+        .and_then(|mut child| child.wait())
+        .map(|status| status.success())
+        .unwrap_or(false)
 }

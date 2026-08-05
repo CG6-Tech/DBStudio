@@ -681,6 +681,15 @@ button { color: inherit; }
 .ai-explain-risks ul { color: #e7c08f; }
 .ai-explain-regenerate { justify-self: start; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid #34454f; border-radius: 5px; color: #8ee0b7; background: transparent; cursor: pointer; font-size: 8px; }
 .ai-settings-note { margin: 0 14px 10px; color: #7b878f; font-size: 8px; line-height: 1.5; }
+.ai-settings-note code { padding: 1px 4px; border-radius: 3px; background: #0c1a14; color: #8ee0b7; font: 8px var(--mono); }
+.ai-agent-choices { display: grid; gap: 8px; padding: 4px 14px 10px; }
+.ai-agent-choice { display: flex; align-items: center; gap: 9px; padding: 10px 11px; border: 1px solid #2b3943; border-radius: 7px; cursor: pointer; }
+.ai-agent-choice.selected { border-color: #3b7a5a; background: #0f1c16; }
+.ai-agent-choice-body { display: flex; flex-direction: column; gap: 2px; }
+.ai-agent-choice-body strong { color: #d7e1dc; font-size: 11px; }
+.ai-agent-status { display: inline-flex; align-items: center; gap: 4px; color: #7b878f; font-size: 8px; }
+.ai-agent-status.ok { color: #7ee0b5; }
+.ai-agent-status.missing { color: #e7c08f; }
 .logic-empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; color: #66766f; text-align: center; }.logic-empty > span { color: #7ee0b5; font-size: 36px; }.logic-empty h2 { margin: 10px 0 5px; color: #d7e1dc; font-size: 17px; }.logic-empty p { max-width: 340px; margin: 0; font-size: 11px; line-height: 1.5; }
 .logic-list-item { position: relative; }.logic-list-item > button:first-of-type { padding-right: 54px; }.logic-list-item .logic-open-flow { position: absolute; right: 6px; top: 8px; width: auto; padding: 5px 7px; border: 1px solid #3b4c47; border-left: 1px solid #3b4c47; color: #7ee0b5; background: #13211c; font-size: 8px; }.logic-inspector-flow { margin: -7px 0 14px; padding: 7px 10px; border: 1px solid #3b554b; border-radius: 6px; color: #7ee0b5; background: #13211c; cursor: pointer; }
 .routine-flow-shell { position: absolute; inset: 0; display: grid; grid-template-rows: 47px minmax(0, 1fr); background: #111318; }.routine-flow-header { z-index: 5; display: flex; align-items: center; gap: 8px; padding: 0 13px; border-bottom: 1px solid #2d3239; background: #1a1d23; color: #7d858e; font-size: 10px; }.routine-flow-header > button, .routine-flow-header div button { padding: 6px 9px; border: 1px solid #3a4048; border-radius: 5px; color: #b8bec5; background: #22262d; cursor: pointer; }.routine-flow-header > button { color: #ff865e; }.routine-flow-header strong { color: #e8eaed; }.routine-flow-header div { display: flex; gap: 5px; margin-left: auto; }

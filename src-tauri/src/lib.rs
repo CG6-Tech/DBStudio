@@ -700,10 +700,8 @@ pub fn run() {
             migration::save_connection_secret,
             migration::delete_connection_secret,
             migration::introspect_database,
-            ai::save_ai_secret,
-            ai::delete_ai_secret,
-            ai::has_ai_secret,
-            ai::ai_complete,
+            ai::run_agent_cli,
+            ai::agent_cli_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DBStudio");

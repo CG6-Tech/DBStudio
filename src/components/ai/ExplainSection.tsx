@@ -38,7 +38,7 @@ export function ExplainSection({ targetId, input }: { targetId: string; input: E
       </button>
       {!configured && (
         <button className="ai-explain-configure" onClick={openSettings}>
-          <Settings2 size={13} /> Configure an AI provider to explain this
+          <Settings2 size={13} /> Choose an AI agent to explain this
         </button>
       )}
       {configured && phase !== "done" && (
